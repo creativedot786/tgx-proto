@@ -1506,6 +1506,18 @@ export default function MarketScreen() {
         }
 
         * { box-sizing: border-box; }
+        /* Without this, the browser's default 8px body margin (and a
+           default white background) shows around the app's 100vh
+           container, and the whole page becomes scrollable instead of just
+           the internal panels - exactly the white-bordered/scrollable body
+           seen when this was published without a reset. */
+        html, body {
+          margin: 0;
+          padding: 0;
+          height: 100%;
+          background: var(--canvas);
+        }
+        #root { height: 100%; }
         .app {
           font-family: 'Inter', sans-serif;
           background: var(--canvas);
