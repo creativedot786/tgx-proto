@@ -22,6 +22,9 @@ import {
   Trash2,
   Sun,
   Moon,
+  Star,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------
@@ -340,6 +343,7 @@ const TICKER_ITEMS = [
 
 const NAV_ITEMS = [
   { id: "market", label: "Market", icon: LayoutGrid },
+  { id: "watchlist", label: "Watchlist", icon: Star },
   { id: "bids", label: "My Bids", icon: Gavel },
   { id: "orders", label: "Orders", icon: ClipboardList },
   { id: "account", label: "Account", icon: UserCircle2 },
@@ -575,20 +579,38 @@ function productHasColor(product) {
 // showing them with a dash) - real catalog rows vary: some have no color,
 // some no storage, some neither.
 function buildVariantGridTemplate(hasStorage, hasColor) {
+  // No reference-price track - that price now lives in the header's
+  // per-variant price list, so the table is purely for placing bids.
   const cols = [];
-  if (hasStorage) cols.push("0.85fr");
-  if (hasColor) cols.push("1.1fr");
-  cols.push("1fr", "0.7fr", "0.95fr", "78px");
+  if (hasStorage) cols.push("0.9fr");
+  if (hasColor) cols.push("1.2fr");
+  cols.push("0.8fr", "1fr", "78px");
   return cols.join(" ");
 }
 
-function ProductRow({ product, isActive, onClick }) {
+function ProductRow({ product, isActive, onClick, isWatchlisted, onToggleWatchlist }) {
   const Icon = CATEGORY_ICON[product.category] || LayoutGrid;
   const cover = getCoverImage(product);
   const [imgFailed, setImgFailed] = useState(false);
   const showPhoto = cover && !imgFailed;
+  // Was a <button> - switched to a div with an explicit button role so a
+  // real nested <button> (the star toggle) is valid, instead of nesting
+  // interactive controls inside a <button> (invalid HTML, and the star
+  // click would also fire row selection via bubbling without a real fix).
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  };
   return (
-    <button className={"prow" + (isActive ? " is-active" : "")} onClick={onClick}>
+    <div
+      className={"prow" + (isActive ? " is-active" : "")}
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={handleKeyDown}
+    >
       <div className={"prow-thumb" + (showPhoto ? " has-photo" : "")}>
         {showPhoto ? (
           <img src={cover} alt="" className="prow-thumb-img" onError={() => setImgFailed(true)} />
@@ -604,8 +626,20 @@ function ProductRow({ product, isActive, onClick }) {
           </span>
         </div>
       </div>
+      {onToggleWatchlist && (
+        <button
+          className={"prow-star" + (isWatchlisted ? " is-active" : "")}
+          title={isWatchlisted ? "Remove from watchlist" : "Add to watchlist"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleWatchlist(product.id);
+          }}
+        >
+          <Star size={15} strokeWidth={2} fill={isWatchlisted ? "currentColor" : "none"} />
+        </button>
+      )}
       <ChevronRight size={15} strokeWidth={1.75} className="prow-chevron" />
-    </button>
+    </div>
   );
 }
 
@@ -615,6 +649,154 @@ function hashProductId(id) {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return h;
+}
+
+// Illustrative only, same reasoning as LastBidNote/ActivityNote - there's no
+// real price-history backend yet, so this generates a deterministic 12-point
+// trend (stable across renders, not random) ending at a given real price,
+// plus the direction/delta used to color the price block and sparkline.
+// Placeholder pending real pricing history.
+function buildTrend(basePrice, key) {
+  if (!basePrice) return null;
+  const pointCount = 12;
+  // Walk backward from the current price using per-step deterministic noise,
+  // then reverse - keeps the trend end pinned to the real reference price.
+  const steps = [];
+  let price = basePrice;
+  for (let i = 0; i < pointCount - 1; i++) {
+    const stepHash = hashProductId(key + "-" + i);
+    const pct = ((stepHash % 13) - 6) / 100; // -6%..+6% per step
+    price = Math.max(1, price / (1 + pct));
+    steps.push(Math.round(price));
+  }
+  const trend = [...steps.reverse(), Math.round(basePrice)];
+  const first = trend[0];
+  const last = trend[trend.length - 1];
+  const change = last - first;
+  const changePct = first ? (change / first) * 100 : 0;
+  const direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
+  return { trend, current: last, change, changePct, direction };
+}
+
+// Independent per-variant trend - different variants can genuinely move on
+// their own (demand, stock, negotiated pricing), so each price row gets its
+// own real direction/color rather than repeating the collective one.
+function getVariantPriceTrend(product, variant) {
+  if (!variant.sellingPrice) return null;
+  const key = product.id + "-" + variant.storage + "-" + variant.color + "-varTrend";
+  return buildTrend(variant.sellingPrice, key);
+}
+
+// Collective trend for the product overall - drives the sparkline and the
+// one aggregate delta shown beside it. Derived by averaging the actual
+// per-variant trends point-by-point, not an independently-generated mock -
+// generating it separately let the aggregate contradict the rows below it
+// (e.g. every variant trending up while the "average" claimed down), since
+// nothing tied the two together.
+function getPriceTrend(product) {
+  const variantTrends = product.variants.map((v) => getVariantPriceTrend(product, v)).filter(Boolean);
+  if (variantTrends.length === 0) return null;
+  const pointCount = variantTrends[0].trend.length;
+  const trend = Array.from({ length: pointCount }, (_, i) =>
+    Math.round(variantTrends.reduce((sum, vt) => sum + vt.trend[i], 0) / variantTrends.length)
+  );
+  const first = trend[0];
+  const last = trend[trend.length - 1];
+  const change = last - first;
+  const changePct = first ? (change / first) * 100 : 0;
+  const direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
+  return { trend, current: last, change, changePct, direction };
+}
+
+// Illustrative only, same reasoning as getPriceTrend - the brief asks the
+// Watchlist to show stock availability, but there's no real inventory field
+// on PRODUCTS yet. Deterministic mock, not a new brand color: "in" reuses
+// --green (positive), "out" reuses --red (negative/unavailable), "low" stays
+// neutral text rather than inventing a warning color the design system
+// doesn't have.
+function getStockStatus(product) {
+  const roll = hashProductId(product.id + "-stock") % 100;
+  if (roll < 8) return "out";
+  if (roll < 28) return "low";
+  return "in";
+}
+
+// Pure trend line, no axis/dates per the brief - a hover crosshair is the
+// only way to read a specific point, via relative "N of 12" position since
+// there's no real timestamp per point yet.
+function Sparkline({ trend, direction }) {
+  const width = 140;
+  const height = 36;
+  const pad = 3;
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const svgRef = useRef(null);
+
+  const min = Math.min(...trend);
+  const max = Math.max(...trend);
+  const range = max - min || 1;
+  const points = trend.map((v, i) => {
+    const x = pad + (i / (trend.length - 1)) * (width - pad * 2);
+    const y = pad + (1 - (v - min) / range) * (height - pad * 2);
+    return [x, y];
+  });
+  const pathD = points.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
+  const areaD = `${pathD} L${points[points.length - 1][0]},${height} L${points[0][0]},${height} Z`;
+  // Lower price is the favorable outcome for a buyer, so this intentionally
+  // inverts the stock-market up=green convention: down=green, up=red.
+  const colorVar = direction === "down" ? "var(--green)" : "var(--red)";
+  const last = points[points.length - 1];
+
+  const handleMove = (e) => {
+    const rect = svgRef.current.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * width;
+    let closest = 0;
+    let closestDist = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.abs(p[0] - relX);
+      if (d < closestDist) {
+        closestDist = d;
+        closest = i;
+      }
+    });
+    setHoverIndex(closest);
+  };
+
+  const hovered = hoverIndex !== null ? points[hoverIndex] : null;
+
+  return (
+    <div className="sparkline-wrap">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        width={width}
+        height={height}
+        className="sparkline-svg"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoverIndex(null)}
+      >
+        <path d={areaD} fill={colorVar} opacity="0.08" stroke="none" />
+        <path d={pathD} fill="none" stroke={colorVar} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        <circle cx={last[0]} cy={last[1]} r="2.5" fill={colorVar} />
+        {hovered && (
+          <>
+            <line x1={hovered[0]} y1={pad} x2={hovered[0]} y2={height - pad} stroke="var(--text-faint)" strokeWidth="1" strokeDasharray="2,2" />
+            <circle cx={hovered[0]} cy={hovered[1]} r="2.5" fill="var(--text)" />
+          </>
+        )}
+      </svg>
+      {hovered && hoverIndex !== null && (
+        <div
+          className="sparkline-tooltip"
+          style={{ left: `${(hovered[0] / width) * 100}%` }}
+        >
+          <span className="tabular">${trend[hoverIndex].toLocaleString()}</span>
+          <span className="sparkline-tooltip-sub">
+            {hoverIndex === trend.length - 1 ? "now" : `${trend.length - 1 - hoverIndex} periods ago`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // staticSignal: renders one signal (priority: Hot cake > bids in review >
@@ -710,26 +892,21 @@ function getLastBidInfo(product) {
   return { status, style, priceLabel, bidAmount, daysAgo };
 }
 
+// Minimal one-liner - same treatment as MobileLastBidStrip/ActivityNote,
+// not a bordered card. Status carries its color as plain text, not a pill.
 function LastBidNote({ product }) {
   const info = getLastBidInfo(product);
   if (!info) return null;
   const { status, style, priceLabel, bidAmount, daysAgo } = info;
 
   return (
-    <div className={"last-bid-note last-bid-edge-" + style.className}>
-      <div className="last-bid-top">
-        <span className="last-bid-label">
-          <Gavel size={14} strokeWidth={2} />
-          Last bid
-        </span>
-        <span className={"status-pill " + style.className}>{style.label}</span>
-      </div>
-      <div className="last-bid-bottom-row">
-        <div className="last-bid-detail tabular">
-          ${bidAmount.toLocaleString()} <span className="last-bid-price-label">({priceLabel})</span> · {daysAgo}d ago
-        </div>
-        {status === "Approved" && <button className="last-bid-cta">Checkout →</button>}
-      </div>
+    <div className="last-bid-note">
+      <Gavel size={13} strokeWidth={2} className="last-bid-icon" />
+      <span className="last-bid-text tabular">
+        Last bid ${bidAmount.toLocaleString()} <span className="last-bid-price-label">({priceLabel})</span> · {daysAgo}d ago
+      </span>
+      <span className={"last-bid-status " + style.className}>{style.label}</span>
+      {status === "Approved" && <button className="last-bid-cta">Checkout →</button>}
     </div>
   );
 }
@@ -904,7 +1081,163 @@ function DetailHero({ product }) {
   );
 }
 
-function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate }) {
+// Price-forward header for Product Detail (desktop) - price is the primary
+// element read first, the product photo is demoted to a small identifying
+// thumbnail beside it (reusing DetailHero's existing image-loading/fallback
+// logic via a CSS-only compact wrapper, not a rewrite), with a sparkline
+// showing recent trend inline.
+function ProductPriceHeader({ product }) {
+  const priceTrend = useMemo(() => getPriceTrend(product), [product]);
+  const directionClass = priceTrend?.direction === "up" ? " pd-price-up" : priceTrend?.direction === "down" ? " pd-price-down" : "";
+  const hasStorage = productHasStorage(product);
+  const hasColor = productHasColor(product);
+  // Nothing to differentiate rows by - one variant, no storage/color to
+  // list. Repeating the product name as a "label" here would just restate
+  // the title above, so this collapses to a single bigger price line
+  // instead of a sparse one-item list.
+  const isSingleVariant = product.variants.length === 1 && !hasStorage && !hasColor;
+  const singleVariant = isSingleVariant ? product.variants[0] : null;
+  const singleTrend = singleVariant ? getVariantPriceTrend(product, singleVariant) : null;
+  const singleDirectionClass = singleTrend?.direction === "up" ? " pd-price-up" : singleTrend?.direction === "down" ? " pd-price-down" : "";
+
+  return (
+    <>
+      {/* Flush section title, not nested inside the bordered card - same
+         treatment as "Place Your Bid"/"Market News" below it. Living
+         inside the card meant it inherited the card's own inner padding
+         and sat ~20px deeper than every other section label on the page. */}
+      <div className="pd-price-section-label">Reference Price</div>
+      <div className="pd-price-card">
+      <div className="pd-price-list">
+        {isSingleVariant ? (
+          <span className={"pd-price-hero tabular" + singleDirectionClass}>
+            {singleTrend?.direction === "up" && <TrendingUp size={18} strokeWidth={2.5} className="pd-price-arrow" />}
+            {singleTrend?.direction === "down" && <TrendingDown size={18} strokeWidth={2.5} className="pd-price-arrow" />}
+            {singleVariant.sellingPrice ? `$${singleVariant.sellingPrice.toLocaleString()}` : "—"}
+          </span>
+        ) : (
+          /* Equal-weight grid, not one hero number - variants can price
+             differently, so no single item is singled out as "the" price.
+             Each item gets its own real trend/color - variants can
+             genuinely move independently, unlike the collective average
+             used for the chart. Side-by-side instead of stacked so
+             variants can be compared at a glance (fastest path to "which
+             one's cheapest"), not just scanned top-to-bottom. */
+          <div className="pd-price-grid">
+            {product.variants.map((v, i) => {
+              // Color only earns a place in the label if it actually
+              // correlates with a different price somewhere - otherwise
+              // "· Silver" implies color is a pricing factor when it isn't.
+              // Two ways that can be true: every variant in the product is
+              // priced the same regardless of storage or color (the S26
+              // Ultra case - $1,250 across all three, so color is a
+              // non-factor everywhere, not just within one storage tier);
+              // or, narrower, multiple colors share one storage at an
+              // identical price even though the product overall does vary.
+              const allVariantsSamePrice = product.variants.every((v2) => v2.sellingPrice === product.variants[0].sellingPrice);
+              const sameStorageSiblings = hasStorage ? product.variants.filter((v2) => v2.storage === v.storage) : [];
+              const colorRedundantWithinStorage = sameStorageSiblings.length > 1 && sameStorageSiblings.every((v2) => v2.sellingPrice === sameStorageSiblings[0].sellingPrice);
+              const colorIsRedundant = hasStorage && (allVariantsSamePrice || colorRedundantWithinStorage);
+              const label = [hasStorage && v.storage, hasColor && !colorIsRedundant && v.color].filter(Boolean).join(" · ") || product.name;
+              const vTrend = getVariantPriceTrend(product, v);
+              const vDirectionClass = vTrend?.direction === "up" ? " pd-price-up" : vTrend?.direction === "down" ? " pd-price-down" : "";
+              return (
+                <div className="pd-price-pair" key={i}>
+                  <div className="pd-price-row-label">{label}</div>
+                  <div className={"pd-price-row-value tabular" + vDirectionClass}>
+                    {vTrend?.direction === "up" && <TrendingUp size={14} strokeWidth={2.5} className="pd-price-arrow" />}
+                    {vTrend?.direction === "down" && <TrendingDown size={14} strokeWidth={2.5} className="pd-price-arrow" />}
+                    {v.sellingPrice ? `$${v.sellingPrice.toLocaleString()}` : "—"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Aggregate delta lives with the chart it explains, not the label -
+          they're the same number expressed two ways (figure + shape). */}
+      {priceTrend ? (
+        <div className="pd-sparkline-block">
+          <div className={"pd-trend-badge tabular" + directionClass}>
+            {priceTrend.direction === "up" && <TrendingUp size={13} strokeWidth={2.5} />}
+            {priceTrend.direction === "down" && <TrendingDown size={13} strokeWidth={2.5} />}
+            {priceTrend.change >= 0 ? "+" : "−"}{Math.abs(priceTrend.changePct).toFixed(1)}%
+          </div>
+          <Sparkline trend={priceTrend.trend} direction={priceTrend.direction} />
+          <div className="pd-price-caption">Avg price trend · illustrative</div>
+        </div>
+      ) : (
+        <div className="pd-price-empty">No trend data yet</div>
+      )}
+      </div>
+    </>
+  );
+}
+
+// Always-visible strip - no expand/collapse. Wraps onto additional rows
+// rather than scrolling so the full watchlist stays visible at once.
+function WatchlistChip({ product, onSelect, onToggleWatchlist }) {
+  const priceTrend = useMemo(() => getPriceTrend(product), [product]);
+  const directionClass = priceTrend?.direction === "up" ? " pd-price-up" : priceTrend?.direction === "down" ? " pd-price-down" : "";
+  const stock = getStockStatus(product);
+  const cover = getCoverImage(product);
+  const Icon = CATEGORY_ICON[product.category] || LayoutGrid;
+  const [imgFailed, setImgFailed] = useState(false);
+  const showPhoto = cover && !imgFailed;
+  return (
+    <button className="wl-chip" onClick={onSelect} title={product.name}>
+      <div className={"wl-chip-thumb" + (showPhoto ? " has-photo" : "")}>
+        {showPhoto ? <img src={cover} alt="" onError={() => setImgFailed(true)} /> : <Icon size={14} strokeWidth={1.6} />}
+      </div>
+      <span className="wl-chip-name">{product.name}</span>
+      {priceTrend && (
+        <span className={"wl-chip-price tabular" + directionClass}>
+          {priceTrend.direction === "up" && <TrendingUp size={11} strokeWidth={2.5} />}
+          {priceTrend.direction === "down" && <TrendingDown size={11} strokeWidth={2.5} />}
+          ${priceTrend.current.toLocaleString()}
+        </span>
+      )}
+      {stock === "out" && <span className="wl-chip-badge">Out of Stock</span>}
+      <span
+        className="wl-chip-remove"
+        role="button"
+        tabIndex={-1}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleWatchlist(product.id);
+        }}
+      >
+        <X size={12} strokeWidth={2.25} />
+      </span>
+    </button>
+  );
+}
+
+function WatchlistStrip({ products, onSelect, onToggleWatchlist }) {
+  return (
+    <div className="wl-strip">
+      <div className="wl-strip-head">
+        <span className="wl-strip-title">Watchlist{products.length > 0 ? ` (${products.length})` : ""}</span>
+      </div>
+      {products.length === 0 ? (
+        <div className="wl-strip-empty">
+          <Star size={14} strokeWidth={1.9} className="wl-empty-icon" />
+          <span>No saved products yet — star items to track price and stock here.</span>
+        </div>
+      ) : (
+        <div className="wl-strip-chips">
+          {products.map((p) => (
+            <WatchlistChip key={p.id} product={p} onSelect={() => onSelect(p.id)} onToggleWatchlist={onToggleWatchlist} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate, isLast }) {
   const [qty, setQty] = useState("");
   const [price, setPrice] = useState("");
   const [swatchFailed, setSwatchFailed] = useState(false);
@@ -918,11 +1251,7 @@ function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate }) {
   };
 
   return (
-    <div className="vrow" style={{ gridTemplateColumns: gridTemplate }}>
-      {/* One real grid item spanning the last 3 tracks (Bid Qty, Target
-          Price, Add), painted first so it sits behind them - a single
-          clean rounded shape instead of two stitched-together halves. */}
-      <div className="vrow-bid-bg" />
+    <div className={"vrow" + (isLast ? " vrow-last" : "")} style={{ gridTemplateColumns: gridTemplate }}>
       {showStorage && <div className="vrow-cell vrow-storage">{variant.storage}</div>}
       {showColor && (
         <div className="vrow-cell vrow-color">
@@ -932,9 +1261,6 @@ function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate }) {
           {variant.color}
         </div>
       )}
-      <div className="vrow-cell vrow-selling tabular">
-        {variant.sellingPrice ? `$${variant.sellingPrice.toLocaleString()}` : "—"}
-      </div>
       <div className="vrow-cell">
         <input
           className="vinput"
@@ -991,15 +1317,26 @@ function MobileTopBar({ themeDark, onToggleTheme }) {
   );
 }
 
-function BottomTabBar({ active }) {
+// "market" and "watchlist" are the only wired tabs - My Bids/Orders/Account
+// remain visual placeholders (no destination screen exists for them yet).
+function BottomTabBar({ active, watchlistCount, onSelect }) {
   return (
     <div className="bottom-tabbar">
       {NAV_ITEMS.map((it) => {
         const Icon = it.icon;
         const isActive = it.id === active;
         return (
-          <button key={it.id} className={"bottom-tab" + (isActive ? " is-active" : "")}>
-            <Icon size={20} strokeWidth={1.75} />
+          <button
+            key={it.id}
+            className={"bottom-tab" + (isActive ? " is-active" : "")}
+            onClick={onSelect ? () => onSelect(it.id) : undefined}
+          >
+            <span className="bottom-tab-icon-wrap">
+              <Icon size={20} strokeWidth={1.75} />
+              {it.id === "watchlist" && watchlistCount > 0 && (
+                <span className="bottom-tab-badge tabular">{watchlistCount}</span>
+              )}
+            </span>
             <span className="bottom-tab-label">{it.label}</span>
           </button>
         );
@@ -1008,18 +1345,154 @@ function BottomTabBar({ active }) {
   );
 }
 
-function ProductCard({ product, onClick }) {
+// Full-screen page, not an inline strip - mobile has no spare above-the-
+// fold space for a wrapping strip the way desktop does, so Watchlist gets
+// its own dedicated screen instead, opened from the top bar.
+// Illustration mirrors the real star's actual position (top-right of a
+// product thumbnail) and actual color (blue, active state) - teaching the
+// gesture with the real UI's own visual language, not a generic graphic.
+// Animated ripple around the star stands in for a "tap here" gesture since
+// there's no real photography/animation asset in this prototype.
+function WatchlistEmptyState({ onBrowse }) {
+  return (
+    <div className="wl-empty-state">
+      <div className="wl-empty-illustration">
+        <div className="wl-empty-card">
+          <div className="wl-empty-card-thumb" />
+          <div className="wl-empty-card-lines">
+            <div className="wl-empty-card-line" />
+            <div className="wl-empty-card-line short" />
+          </div>
+        </div>
+        <div className="wl-empty-star-wrap">
+          <span className="wl-empty-ripple" />
+          <span className="wl-empty-ripple wl-empty-ripple-delay" />
+          <Star size={16} strokeWidth={2} className="wl-empty-star" fill="currentColor" />
+        </div>
+      </div>
+      <div className="wl-empty-heading">Your watchlist is empty</div>
+      <p className="wl-empty-copy">
+        Tap the star on any product to save it here. We'll track price changes and stock status for everything you're watching.
+      </p>
+      {onBrowse && (
+        <button className="wl-empty-cta" onClick={onBrowse}>
+          Browse Products
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MobileWatchlistPage({ products, onBack, onSelect, onToggleWatchlist }) {
+  return (
+    <div className="mobile-watchlist-page">
+      <div className="mobile-watchlist-header">
+        <button className="mobile-watchlist-back" onClick={onBack} title="Back">
+          <ChevronLeft size={20} strokeWidth={2.25} />
+        </button>
+        <span className="mobile-watchlist-title">
+          Watchlist{products.length > 0 ? ` (${products.length})` : ""}
+        </span>
+      </div>
+      <div className="mobile-watchlist-scroll">
+        {products.length === 0 ? (
+          <WatchlistEmptyState onBrowse={onBack} />
+        ) : (
+          <div className="mobile-watchlist-list">
+            {products.map((p) => (
+              <MobileWatchlistItem
+                key={p.id}
+                product={p}
+                onSelect={() => onSelect(p.id)}
+                onToggleWatchlist={onToggleWatchlist}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MobileWatchlistItem({ product, onSelect, onToggleWatchlist }) {
+  const priceTrend = useMemo(() => getPriceTrend(product), [product]);
+  const directionClass = priceTrend?.direction === "up" ? " pd-price-up" : priceTrend?.direction === "down" ? " pd-price-down" : "";
+  const stock = getStockStatus(product);
+  const cover = getCoverImage(product);
+  const Icon = CATEGORY_ICON[product.category] || LayoutGrid;
+  const [imgFailed, setImgFailed] = useState(false);
+  const showPhoto = cover && !imgFailed;
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect();
+    }
+  };
+  return (
+    <div className="mwl-item" role="button" tabIndex={0} onClick={onSelect} onKeyDown={handleKeyDown}>
+      <div className={"mwl-item-thumb" + (showPhoto ? " has-photo" : "")}>
+        {showPhoto ? <img src={cover} alt="" onError={() => setImgFailed(true)} /> : <Icon size={20} strokeWidth={1.5} />}
+      </div>
+      <div className="mwl-item-body">
+        <div className="mwl-item-name">{product.name}</div>
+        <div className="mwl-item-meta">
+          {priceTrend && (
+            <span className={"mwl-item-price tabular" + directionClass}>
+              {priceTrend.direction === "up" && <TrendingUp size={12} strokeWidth={2.5} />}
+              {priceTrend.direction === "down" && <TrendingDown size={12} strokeWidth={2.5} />}
+              ${priceTrend.current.toLocaleString()}
+            </span>
+          )}
+          {stock === "out" && <span className="mwl-item-badge">Out of Stock</span>}
+        </div>
+      </div>
+      <button
+        className="mwl-item-star"
+        title="Remove from watchlist"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleWatchlist(product.id);
+        }}
+      >
+        <Star size={16} strokeWidth={2} fill="currentColor" />
+      </button>
+    </div>
+  );
+}
+
+// Was a <button> - switched to a div with an explicit button role so a
+// real nested <button> (the star toggle) is valid, same fix ProductRow
+// needed on desktop for the same reason.
+function ProductCard({ product, onClick, isWatchlisted, onToggleWatchlist }) {
   const Icon = CATEGORY_ICON[product.category] || LayoutGrid;
   const cover = getCoverImage(product);
   const [imgFailed, setImgFailed] = useState(false);
   const showPhoto = cover && !imgFailed;
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  };
   return (
-    <button className="pcard" onClick={onClick}>
+    <div className="pcard" role="button" tabIndex={0} onClick={onClick} onKeyDown={handleKeyDown}>
       <div className={"pcard-thumb" + (showPhoto ? " has-photo" : "")}>
         {showPhoto ? (
           <img src={cover} alt="" className="pcard-thumb-img" onError={() => setImgFailed(true)} />
         ) : (
           <Icon size={30} strokeWidth={1.4} />
+        )}
+        {onToggleWatchlist && (
+          <button
+            className={"pcard-star" + (isWatchlisted ? " is-active" : "")}
+            title={isWatchlisted ? "Remove from watchlist" : "Add to watchlist"}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleWatchlist(product.id);
+            }}
+          >
+            <Star size={14} strokeWidth={2} fill={isWatchlisted ? "currentColor" : "none"} />
+          </button>
         )}
       </div>
       <div className="pcard-body">
@@ -1031,7 +1504,7 @@ function ProductCard({ product, onClick }) {
           <ActivityNote product={product} staticSignal />
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -1081,15 +1554,9 @@ function VariantCard({ variant, onAdd, showStorage, showColor, defaultExpanded, 
           )}
           <span className="vcard-title">{title}</span>
         </div>
-        <div className="vcard-head-side">
-          <div className="vcard-price-block">
-            <span className="vcard-price-label">Selling</span>
-            <span className="tabular vcard-price">
-              {variant.sellingPrice ? `$${variant.sellingPrice.toLocaleString()}` : "—"}
-            </span>
-          </div>
-          <ChevronRight size={15} strokeWidth={1.75} className={"vcard-chevron" + (expanded ? " is-open" : "")} />
-        </div>
+        {/* No price here - it's redundant with the Reference Price section
+            above, same separation of concerns as the desktop bid table. */}
+        <ChevronRight size={15} strokeWidth={1.75} className={"vcard-chevron" + (expanded ? " is-open" : "")} />
       </button>
       {expanded && (
         <div className="vcard-form">
@@ -1206,12 +1673,8 @@ function SingleVariantBidForm({ variant, onAdd }) {
 
   return (
     <div className="vcard vcard-single">
-      <div className="vcard-single-price-row">
-        <span className="vcard-price-label">Selling Price</span>
-        <span className="tabular vcard-price-lg">
-          {variant.sellingPrice ? `$${variant.sellingPrice.toLocaleString()}` : "—"}
-        </span>
-      </div>
+      {/* No price header here - redundant with the Reference Price section
+          above, same separation of concerns as the desktop bid table. */}
       <div className="vcard-form">
         <div className="vcard-field">
           <span className="vcard-field-label">Bid Qty</span>
@@ -1247,7 +1710,103 @@ function SingleVariantBidForm({ variant, onAdd }) {
   );
 }
 
-function MobileDetailPage({ product, onBack, onAdd, footerHeight }) {
+// Mobile equivalent of the desktop Reference Price card - same underlying
+// data/logic (getPriceTrend, getVariantPriceTrend, the color-redundancy
+// check), but stacked vertically instead of a side-by-side grid, since
+// there's no spare horizontal width on a phone for a multi-column layout.
+function MobilePriceSection({ product }) {
+  const priceTrend = useMemo(() => getPriceTrend(product), [product]);
+  const directionClass = priceTrend?.direction === "up" ? " pd-price-up" : priceTrend?.direction === "down" ? " pd-price-down" : "";
+  const hasStorage = productHasStorage(product);
+  const hasColor = productHasColor(product);
+  const isSingleVariant = product.variants.length === 1 && !hasStorage && !hasColor;
+  const singleVariant = isSingleVariant ? product.variants[0] : null;
+  const singleTrend = singleVariant ? getVariantPriceTrend(product, singleVariant) : null;
+  const singleDirectionClass = singleTrend?.direction === "up" ? " pd-price-up" : singleTrend?.direction === "down" ? " pd-price-down" : "";
+
+  return (
+    <>
+      <div className="section-label">Reference Price</div>
+      <div className="mp-price-card">
+        {isSingleVariant ? (
+          <span className={"pd-price-hero tabular" + singleDirectionClass}>
+            {singleTrend?.direction === "up" && <TrendingUp size={18} strokeWidth={2.5} className="pd-price-arrow" />}
+            {singleTrend?.direction === "down" && <TrendingDown size={18} strokeWidth={2.5} className="pd-price-arrow" />}
+            {singleVariant.sellingPrice ? `$${singleVariant.sellingPrice.toLocaleString()}` : "—"}
+          </span>
+        ) : (
+          <div className="mp-price-list">
+            {product.variants.map((v, i) => {
+              const allVariantsSamePrice = product.variants.every((v2) => v2.sellingPrice === product.variants[0].sellingPrice);
+              const sameStorageSiblings = hasStorage ? product.variants.filter((v2) => v2.storage === v.storage) : [];
+              const colorRedundantWithinStorage = sameStorageSiblings.length > 1 && sameStorageSiblings.every((v2) => v2.sellingPrice === sameStorageSiblings[0].sellingPrice);
+              const colorIsRedundant = hasStorage && (allVariantsSamePrice || colorRedundantWithinStorage);
+              const label = [hasStorage && v.storage, hasColor && !colorIsRedundant && v.color].filter(Boolean).join(" · ") || product.name;
+              const vTrend = getVariantPriceTrend(product, v);
+              const vDirectionClass = vTrend?.direction === "up" ? " pd-price-up" : vTrend?.direction === "down" ? " pd-price-down" : "";
+              return (
+                <div className="mp-price-row" key={i}>
+                  <span className="pd-price-row-label">{label}</span>
+                  <span className={"pd-price-row-value tabular" + vDirectionClass}>
+                    {vTrend?.direction === "up" && <TrendingUp size={13} strokeWidth={2.5} className="pd-price-arrow" />}
+                    {vTrend?.direction === "down" && <TrendingDown size={13} strokeWidth={2.5} className="pd-price-arrow" />}
+                    {v.sellingPrice ? `$${v.sellingPrice.toLocaleString()}` : "—"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {priceTrend ? (
+          <div className="mp-trend-block">
+            <div className={"pd-trend-badge tabular" + directionClass}>
+              {priceTrend.direction === "up" && <TrendingUp size={13} strokeWidth={2.5} />}
+              {priceTrend.direction === "down" && <TrendingDown size={13} strokeWidth={2.5} />}
+              {priceTrend.change >= 0 ? "+" : "−"}{Math.abs(priceTrend.changePct).toFixed(1)}%
+            </div>
+            <Sparkline trend={priceTrend.trend} direction={priceTrend.direction} />
+            <div className="pd-price-caption">Avg price trend · illustrative</div>
+          </div>
+        ) : (
+          <div className="pd-price-empty">No trend data yet</div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// Same "ticker of intelligence" concept as desktop, but a native mobile
+// carousel pattern (two cards visible, snap-scroll) instead of desktop's
+// 3-4-visible row - reuses the same mock data/scoring and news-card styles.
+function MobileMarketNews({ product }) {
+  const items = useMemo(() => getMarketNews(product), [product]);
+  if (items.length === 0) return null;
+
+  return (
+    <>
+      <div className="section-label">Market News</div>
+      <div className="mp-news-row">
+        {items.map((item) => (
+          <div className="mp-news-card news-card" key={item.id}>
+            <div className="news-card-meta">
+              <span className="news-card-source">{item.source}</span>
+              <span className="news-card-dot" />
+              <span>{formatNewsAge(item.hoursAgo)}</span>
+            </div>
+            <div className="news-card-headline">{item.headline}</div>
+            <div className="news-card-gloss">
+              <span className="news-card-gloss-label">AI insight</span>
+              {item.gloss}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function MobileDetailPage({ product, onBack, onAdd, footerHeight, isWatchlisted, onToggleWatchlist }) {
   const hasStorage = productHasStorage(product);
   const hasColor = productHasColor(product);
   const isSingleSimpleVariant = product.variants.length === 1 && !hasStorage && !hasColor;
@@ -1256,6 +1815,16 @@ function MobileDetailPage({ product, onBack, onAdd, footerHeight }) {
     <div className="mobile-detail-page">
       <button className="mobile-hero-back" onClick={onBack} title="Back">
         <ChevronLeft size={20} strokeWidth={2.25} />
+      </button>
+      {/* Same floating-over-the-hero convention as the back button, just
+          mirrored to the top-right - standard mobile PDP save/favorite
+          placement. */}
+      <button
+        className={"mobile-hero-star" + (isWatchlisted ? " is-active" : "")}
+        onClick={() => onToggleWatchlist(product.id)}
+        title={isWatchlisted ? "Remove from watchlist" : "Add to watchlist"}
+      >
+        <Star size={18} strokeWidth={2} fill={isWatchlisted ? "currentColor" : "none"} />
       </button>
       <div className="mobile-detail-scroll" ref={scrollRef}>
         <MobileHero product={product} />
@@ -1273,27 +1842,29 @@ function MobileDetailPage({ product, onBack, onAdd, footerHeight }) {
             <MobileLastBidStrip product={product} />
           </div>
 
+          <MobilePriceSection product={product} />
+
+          <div className="section-label">Place Your Bid</div>
           {isSingleSimpleVariant ? (
             <SingleVariantBidForm variant={product.variants[0]} onAdd={onAdd} />
           ) : (
-            <>
-              <div className="section-label">Variants</div>
-              <div className="vcard-list">
-                {product.variants.map((v, i) => (
-                  <VariantCard
-                    key={i}
-                    variant={v}
-                    onAdd={onAdd}
-                    showStorage={hasStorage}
-                    showColor={hasColor}
-                    defaultExpanded={i === 0}
-                    scrollContainerRef={scrollRef}
-                    footerHeight={footerHeight}
-                  />
-                ))}
-              </div>
-            </>
+            <div className="vcard-list">
+              {product.variants.map((v, i) => (
+                <VariantCard
+                  key={i}
+                  variant={v}
+                  onAdd={onAdd}
+                  showStorage={hasStorage}
+                  showColor={hasColor}
+                  defaultExpanded={i === 0}
+                  scrollContainerRef={scrollRef}
+                  footerHeight={footerHeight}
+                />
+              ))}
+            </div>
           )}
+
+          <MobileMarketNews product={product} />
         </div>
       </div>
     </div>
@@ -1356,6 +1927,197 @@ function MobileTraySheet({ tray, onClose, onRemove, onSubmit }) {
   );
 }
 
+// Renamed from the old floating "Pending Bids" popover into a persistent
+// collapsible sidebar living beside Product Detail. Collapsed by default
+// (narrow icon+count rail, so the summary stays "always visible" without
+// permanently taking width from Product Detail); expands into the full list
+// on demand. Reuses the existing .tray-line/.tray-btn styling for the line
+// items and Submit button rather than introducing parallel classes.
+function OrderBookSidebar({ tray, expanded, onToggleExpanded, onRemove, onSubmit, flashKey }) {
+  return (
+    <div className={"orderbook-sidebar" + (expanded ? " is-expanded" : "")}>
+      <button
+        className="orderbook-header"
+        onClick={onToggleExpanded}
+        title={expanded ? "Collapse Order Book" : "Expand Order Book"}
+      >
+        <ClipboardList size={18} strokeWidth={1.8} className="orderbook-icon" />
+        {expanded && <span className="orderbook-title">Order Book</span>}
+        {tray.length > 0 && <span className="orderbook-count tabular">{tray.length}</span>}
+        {expanded ? <ChevronsRight size={14} strokeWidth={2} /> : <ChevronsLeft size={14} strokeWidth={2} />}
+      </button>
+
+      {expanded && (
+        <>
+          {tray.length === 0 ? (
+            <div className="orderbook-empty">No pending bids yet — add a bid from the variant table below to see it here.</div>
+          ) : (
+            <div className="orderbook-list">
+              {tray.map((t) => (
+                <div className={"tray-line orderbook-line" + (t.key === flashKey ? " is-flash" : "")} key={t.key}>
+                  <div className="tray-line-main">
+                    <div className="tray-line-name">{t.productName}</div>
+                    <div className="tray-line-meta tabular">
+                      {t.storage !== "—" ? `${t.storage} · ` : ""}{t.color !== "—" ? `${t.color} · ` : ""}Qty {t.qty} · ${t.price}
+                    </div>
+                  </div>
+                  <button className="tray-line-remove" onClick={() => onRemove(t.key)}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {tray.length > 0 && (
+            <div className="orderbook-footer">
+              <button className="tray-btn orderbook-submit" onClick={onSubmit}>
+                Submit All Bids <ChevronRight size={14} />
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Illustrative only - fully mocked per the stakeholder-demo decision (no
+// live NewsAPI/GNews call, no live AI summarization). Static pool, scored
+// per the currently-viewed product: category match, brand keyword match,
+// then recency - same weighting the brief called for, just against a fixed
+// list instead of a real corpus. "gloss" mocks the AI-generated "why this
+// matters" line the brief flagged as the differentiator, worth doing even
+// as static text since it demonstrates the concept for the demo.
+const NEWS_ITEMS = [
+  { id: "n1", category: "mobile", brand: "SSNG", source: "Reuters", hoursAgo: 2, headline: "Samsung reportedly facing Q3 chip shortage across Galaxy line", gloss: "May affect Galaxy S-series restock timelines in the coming weeks." },
+  { id: "n2", category: "mobile", brand: "NOKA", source: "GSMArena", hoursAgo: 5, headline: "HMD Global expands Nokia feature phone production in Vietnam", gloss: "Could ease lead times on entry-level Nokia SKUs." },
+  { id: "n3", category: "mobile", brand: null, source: "The Verge", hoursAgo: 9, headline: "Global smartphone shipments up 4% year-over-year", gloss: "Broad demand tailwind across the mobile category." },
+  { id: "n4", category: "console", brand: "SNY", source: "Bloomberg Tech", hoursAgo: 3, headline: "Sony trims PS5 production forecast for next quarter", gloss: "Watch for tighter allocation on PlayStation consoles." },
+  { id: "n5", category: "console", brand: "SNY", source: "IGN", hoursAgo: 14, headline: "PlayStation Portal sees renewed demand after firmware update", gloss: "Portal inventory may move faster than usual this cycle." },
+  { id: "n6", category: "speaker", brand: "LOEW", source: "What Hi-Fi", hoursAgo: 20, headline: "Loewe unveils new premium audio lineup for EMEA", gloss: "Signals fresh premium-tier stock incoming to the region." },
+  { id: "n7", category: "tablet", brand: "SSNG", source: "GSMArena", hoursAgo: 11, headline: "Samsung Galaxy Tab S11 series sees strong early demand", gloss: "Early sell-through suggests reordering sooner rather than later." },
+  { id: "n8", category: "mobile", brand: "HMD", source: "TechRadar", hoursAgo: 30, headline: "HMD posts strong growth in feature phone segment", gloss: "Reinforces steady demand for budget-tier handsets." },
+  { id: "n9", category: null, brand: null, source: "Nikkei Asia", hoursAgo: 26, headline: "Consumer electronics supply chains stabilize after chip crunch", gloss: "General tailwind for lead times across categories." },
+  { id: "n10", category: "console", brand: null, source: "IGN", hoursAgo: 40, headline: "Gaming console resale prices climb ahead of holiday season", gloss: "Reference pricing may trend upward heading into Q4." },
+  { id: "n11", category: "watch", brand: null, source: "TechRadar", hoursAgo: 17, headline: "Wearable market sees modest growth amid inventory correction", gloss: "Smartwatch demand stabilizing after a slow prior quarter." },
+  { id: "n12", category: "accessory", brand: null, source: "The Verge", hoursAgo: 22, headline: "Bluetooth audio accessory demand steady into year-end", gloss: "No major disruption expected for accessory restocks." },
+];
+
+function getMarketNews(product) {
+  const scored = NEWS_ITEMS.map((item) => {
+    let score = 0;
+    if (item.category && item.category === product?.category) score += 10;
+    if (!item.category) score += 2;
+    if (item.brand && item.brand === product?.brand) score += 15;
+    score += Math.max(0, 10 - item.hoursAgo / 4);
+    return { ...item, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, 8);
+}
+
+function formatNewsAge(hoursAgo) {
+  return hoursAgo < 24 ? `${hoursAgo}h ago` : `${Math.floor(hoursAgo / 24)}d ago`;
+}
+
+// Horizontal "ticker of intelligence" card row, not a vertical article list -
+// deliberately placed inside .vtable-wrap (below the bid table) rather than
+// the Order Book sidebar, since the sidebar's ~360px width can't fit the
+// multi-card-visible layout this design calls for.
+function MarketNewsSection({ product }) {
+  const items = useMemo(() => getMarketNews(product), [product]);
+  if (items.length === 0) return null;
+
+  return (
+    <div className="news-section">
+      <div className="news-section-head">
+        <span className="news-section-title">Market News</span>
+      </div>
+      <div className="news-row">
+        {items.map((item) => (
+          <div className="news-card" key={item.id}>
+            <div className="news-card-meta">
+              <span className="news-card-source">{item.source}</span>
+              <span className="news-card-dot" />
+              <span>{formatNewsAge(item.hoursAgo)}</span>
+            </div>
+            <div className="news-card-headline">{item.headline}</div>
+            <div className="news-card-gloss">
+              <span className="news-card-gloss-label">AI insight</span>
+              {item.gloss}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Cmd/Ctrl+K quick-jump - global product search independent of whatever
+// category/brand/search filters are currently active in the sidebar.
+function CommandPalette({ open, onClose, onSelect }) {
+  const [q, setQ] = useState("");
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (open) {
+      setQ("");
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  const results = useMemo(() => {
+    if (!open) return [];
+    const needle = q.trim().toLowerCase();
+    const list = needle ? DISPLAY_PRODUCTS.filter((p) => p.name.toLowerCase().includes(needle)) : DISPLAY_PRODUCTS;
+    return list.slice(0, 8);
+  }, [q, open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="cmdk-backdrop" onClick={onClose}>
+      <div className="cmdk-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="cmdk-input-row">
+          <Search size={16} strokeWidth={2} className="cmdk-input-icon" />
+          <input
+            ref={inputRef}
+            className="cmdk-input"
+            placeholder="Jump to a product…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") onClose();
+              if (e.key === "Enter" && results[0]) onSelect(results[0].id);
+            }}
+          />
+          <span className="cmdk-esc">Esc</span>
+        </div>
+        <div className="cmdk-results">
+          {results.length === 0 ? (
+            <div className="cmdk-empty">No products match "{q}"</div>
+          ) : (
+            results.map((p) => {
+              const Icon = CATEGORY_ICON[p.category] || LayoutGrid;
+              const cover = getCoverImage(p);
+              const brandName = BRANDS.find((b) => b.code === p.brand)?.name;
+              return (
+                <button className="cmdk-item" key={p.id} onClick={() => onSelect(p.id)}>
+                  <span className="cmdk-item-thumb">
+                    {cover ? <img src={cover} alt="" /> : <Icon size={16} strokeWidth={1.6} />}
+                  </span>
+                  <span className="cmdk-item-name">{p.name}</span>
+                  {brandName && <span className="cmdk-item-brand">{brandName}</span>}
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------
    MAIN
 --------------------------------------------------------------------- */
@@ -1366,14 +2128,22 @@ export default function MarketScreen() {
   const [query, setQuery] = useState("");
   const [selectedProductId, setSelectedProductId] = useState(DISPLAY_PRODUCTS[0].id);
   const [tray, setTray] = useState([]);
-  const [trayOpen, setTrayOpen] = useState(false);
+  // Now drives the Order Book sidebar's collapsed/expanded state (renamed
+  // from its old job of showing/hiding the floating popover) - same
+  // semantic ("is the pending-bids detail visible"), new presentation.
+  const [trayOpen, setTrayOpen] = useState(true);
+  const [flashKey, setFlashKey] = useState(null);
+  const [watchlist, setWatchlist] = useState(() => new Set());
   const [confirmation, setConfirmation] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const searchRef = useRef(null);
-  const [navCollapsed, setNavCollapsed] = useState(
-    () => typeof window !== "undefined" && window.innerWidth < 1400
-  );
+  // Always collapsed by default now (was width-based) - gives Product
+  // Detail/Order Book more room from the first paint instead of only
+  // collapsing reactively on narrow viewports.
+  const [navCollapsed, setNavCollapsed] = useState(true);
   const isCompact = useIsCompact();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [mobileWatchlistOpen, setMobileWatchlistOpen] = useState(false);
   // Placeholder only - toggles which icon shows, doesn't apply a theme yet.
   const [themeDark, setThemeDark] = useState(true);
   const toggleTheme = () => setThemeDark((d) => !d);
@@ -1425,6 +2195,11 @@ export default function MarketScreen() {
     });
   }, [selectedBrands, selectedCategory, query]);
 
+  const watchlistedProducts = useMemo(
+    () => DISPLAY_PRODUCTS.filter((p) => watchlist.has(p.id)),
+    [watchlist]
+  );
+
   useEffect(() => {
     if (filteredProducts.length && !filteredProducts.find((p) => p.id === selectedProductId)) {
       setSelectedProductId(filteredProducts[0].id);
@@ -1444,14 +2219,29 @@ export default function MarketScreen() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Cmd/Ctrl+K - quick-jump palette, separate listener from "/" above since
+  // it needs to fire even while a text input (like search) already has
+  // focus, which "/" deliberately doesn't.
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   const selectedProduct = PRODUCTS.find((p) => p.id === selectedProductId) || filteredProducts[0];
 
   const addToTray = (item) => {
     const { variantImage, ...rest } = item;
+    const key = `${selectedProduct.id}-${item.storage}-${item.color}-${Date.now()}`;
     setTray((prev) => [
       ...prev,
       {
-        key: `${selectedProduct.id}-${item.storage}-${item.color}-${Date.now()}`,
+        key,
         productName: selectedProduct.name,
         brand: selectedProduct.brandName,
         // Only the variant's own photo, never the product's generic cover -
@@ -1468,9 +2258,35 @@ export default function MarketScreen() {
     // page open instead (agreed flow: add another variant, back out manually)
     // and only surfaces the sticky tray bar.
     if (!isCompact) setTrayOpen(true);
+    // Row-flash on the Order Book sidebar - the only genuine "update" event
+    // available without a live backend (bid statuses are static mock data
+    // otherwise, nothing else changes on its own during a session).
+    setFlashKey(key);
+    window.setTimeout(() => setFlashKey((k) => (k === key ? null : k)), 1300);
+  };
+
+  const toggleWatchlist = (productId) => {
+    setWatchlist((prev) => {
+      const next = new Set(prev);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
   };
 
   const removeFromTray = (key) => setTray((prev) => prev.filter((t) => t.key !== key));
+
+  // Resets category/brand/search filters, not just the selection - without
+  // this, the existing "snap selection back to filteredProducts[0]" effect
+  // would immediately override a palette pick that falls outside whatever
+  // filters happen to be active.
+  const jumpToProduct = (id) => {
+    setSelectedCategory("all");
+    setSelectedBrands([]);
+    setQuery("");
+    setSelectedProductId(id);
+    setPaletteOpen(false);
+  };
 
   const submitAll = () => {
     setTray([]);
@@ -1955,6 +2771,35 @@ export default function MarketScreen() {
         .prow-variant-count { font-size: 13px; color: var(--text-muted); }
         .prow-chevron { color: var(--text-faint); flex-shrink: 0; }
         .prow.is-active .prow-chevron { color: var(--blue); }
+        .prow-star {
+          background: transparent;
+          border: none;
+          color: var(--text-faint);
+          display: flex;
+          padding: 4px;
+          flex-shrink: 0;
+        }
+        .prow-star:hover { color: var(--text-muted); }
+        /* Blue, not a new color - a starred item is structurally the same
+           "persistent, user-toggled selection" as the Brand Filter chips'
+           is-active state, which already reuses blue for that same job. */
+        .prow-star.is-active { color: var(--blue); }
+
+        /* WORKSPACE - wraps Watchlist + the Product Detail / Order Book
+           split. Product Detail keeps its existing .detail styling below;
+           this is purely the new outer scaffolding. */
+        .workspace {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          min-height: 0;
+        }
+        .workspace-row {
+          flex: 1;
+          display: flex;
+          min-height: 0;
+        }
 
         /* DETAIL COLUMN */
         .detail {
@@ -1969,6 +2814,43 @@ export default function MarketScreen() {
           max-width: 1100px;
           flex-shrink: 0;
         }
+        /* Thumbnail lives with the title/identity now, not inside the price
+           card - it's "what product is this", not pricing data. */
+        .detail-identity { display: flex; align-items: flex-start; gap: 16px; }
+        /* Pushed to the far right regardless of title width via
+           margin-left:auto, rather than needing .detail-identity-text to
+           be flex:1 - keeps the title free to size/wrap naturally. */
+        /* Icon + label, not icon-only - a bare icon next to a large title
+           is easy to miss before someone's learned what it does (icon-only
+           is more of a mobile-density convention, which is why it works
+           fine floating over the hero image there). Label stays static on
+           toggle (color/fill communicate state) so the button doesn't
+           visibly resize. */
+        .detail-watchlist-cta {
+          margin-left: auto;
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: transparent;
+          border: 1px solid var(--line);
+          border-radius: 20px;
+          padding: 6px 14px;
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--text-muted);
+        }
+        .detail-watchlist-cta:hover { color: var(--text); border-color: var(--text-faint); }
+        .detail-watchlist-cta.is-active { color: var(--blue); border-color: var(--blue); }
+        .detail-thumb-compact { flex-shrink: 0; }
+        .detail-thumb-compact .detail-hero-wrap,
+        .detail-thumb-compact .detail-hero { width: 64px; height: 64px; }
+        .detail-thumb-compact .detail-hero-wrap::before { inset: -6px; }
+        .detail-thumb-compact .detail-gallery { display: none; }
+        .detail-identity-text { min-width: 0; }
+        /* Scoped, not a change to .activity-note itself - it's reused
+           elsewhere (product grid cards) with different spacing needs. */
+        .detail-identity-text .activity-note { margin-top: 6px; }
         .detail-eyebrow {
           font-family: 'JetBrains Mono', monospace;
           font-size: 13px;
@@ -1983,34 +2865,25 @@ export default function MarketScreen() {
           margin: 0;
         }
 
+        /* One line, no box - same minimal treatment as .activity-note and
+           MobileLastBidStrip, not a bordered card. */
         .last-bid-note {
-          margin-top: 14px;
-          padding: 10px 14px 10px 12px;
-          background: var(--surface);
-          border: 1px solid var(--line);
-          border-left: 3px solid var(--line);
-          border-radius: 8px;
-          display: inline-flex;
-          flex-direction: column;
-          gap: 5px;
-        }
-        .last-bid-edge-status-placed { border-left-color: var(--blue); }
-        .last-bid-edge-status-rejected { border-left-color: var(--red); }
-        .last-bid-edge-status-completed { border-left-color: var(--text-muted); }
-        .last-bid-edge-status-approved { border-left-color: var(--green); }
-        .last-bid-top {
+          margin-top: 8px;
           display: flex;
           align-items: center;
-          gap: 10px;
-        }
-        .last-bid-label {
-          display: flex;
-          align-items: center;
-          gap: 6px;
+          flex-wrap: wrap;
+          gap: 8px;
           font-size: 13px;
-          font-weight: 600;
           color: var(--text-muted);
         }
+        .last-bid-icon { flex-shrink: 0; color: var(--text-faint); }
+        .last-bid-price-label { color: var(--text-muted); }
+        .last-bid-status { font-weight: 600; }
+        .last-bid-status.status-placed { color: var(--blue); }
+        .last-bid-status.status-rejected { color: var(--red); }
+        .last-bid-status.status-completed { color: var(--text-muted); }
+        .last-bid-status.status-approved { color: var(--green); }
+        /* Still used by MobileLastBidStrip's boxed treatment. */
         .status-pill {
           font-size: 13px;
           font-weight: 600;
@@ -2021,27 +2894,12 @@ export default function MarketScreen() {
         .status-pill.status-rejected { background: rgba(var(--red-rgb), 0.12); color: var(--red); }
         .status-pill.status-completed { background: var(--surface-raised); color: var(--text-muted); }
         .status-pill.status-approved { background: rgba(var(--green-rgb), 0.12); color: var(--green); }
-        .last-bid-detail {
-          font-family: 'JetBrains Mono', monospace;
-          font-size: 15px;
-          color: var(--text);
-        }
-        .last-bid-price-label {
-          font-family: 'Inter', sans-serif;
-          color: var(--text-muted);
-        }
-        .last-bid-bottom-row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 16px;
-        }
         .last-bid-cta {
           flex-shrink: 0;
           background: none;
           border: none;
           padding: 0;
-          font-size: 15px;
+          font-size: 13px;
           font-weight: 600;
           color: var(--amber);
           cursor: pointer;
@@ -2049,9 +2907,13 @@ export default function MarketScreen() {
         }
         .last-bid-cta:hover { text-decoration: underline; }
 
+        /* Was a side-by-side row (image left, specs right) - now stacked:
+           the new price-forward header first (the primary read), specs
+           below it. Price replaces the image as the thing read first. */
         .detail-overview {
           display: flex;
-          gap: 28px;
+          flex-direction: column;
+          gap: 18px;
           padding: 0 26px 24px;
           max-width: 1100px;
           border-bottom: 1px solid var(--line-soft);
@@ -2127,15 +2989,261 @@ export default function MarketScreen() {
           box-sizing: border-box;
         }
         .detail-gallery-thumb.is-active { border-color: var(--blue); }
-        .detail-overview-side {
-          flex: 1;
-          min-width: 0;
-          max-width: 480px;
-          padding-top: 4px;
+        /* PRICE-FORWARD HEADER - one bordered card, pure pricing data (no
+           thumbnail - that now lives with the title in .detail-identity). */
+        /* Border only, no fill - enough to read as one grouped unit
+           without adding another filled panel on a page that already has
+           several (Order Book, table). Content's own typography (bold
+           colored prices vs. muted labels) carries the hierarchy now, not
+           the box. */
+        .pd-price-card {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 14px 22px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 16px 20px;
+        }
+        /* Equal-weight variant price list - replaces the old single hero
+           number now that variants can price differently. Each row carries
+           its own color/arrow, since variants can genuinely move
+           independently (demand, stock, negotiated pricing per SKU) -
+           unlike the one collective average used for the chart. */
+        .pd-price-list {
           display: flex;
           flex-direction: column;
-          gap: 20px;
+          gap: 10px;
+          /* A basis (not flex-shrink:0 + min-width) makes the 3-column
+             grid actually claim room on wide viewports - a flex item with
+             no explicit basis collapses toward its grid's min-content, so
+             auto-fit never got the width to lay out 3 columns. Allowed to
+             shrink (and .pd-price-grid falls back to fewer columns) once
+             the card itself doesn't have 440px to spare - paired with
+             flex-wrap on .pd-price-card so the sparkline drops to its own
+             row instead of overflowing when things get tight. */
+          flex: 1 1 440px;
+          min-width: 0;
         }
+        /* Side-by-side variant comparison, not a stacked list - up to 3
+           columns (the catalog's max variant count today), wrapping to
+           fewer/narrower columns if the card gets squeezed. */
+        .pd-price-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+          gap: 14px 20px;
+        }
+        /* Flush section title above the card (see the .pd-price-card JSX
+           comment) - same eyebrow treatment as .spec-label, deliberately
+           plain/uncolored so it doesn't outrank the prices it labels. */
+        .pd-price-section-label {
+          font-size: 13px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: var(--text-muted);
+        }
+        /* Each variant is a 2-line pair (label, then arrow+price) - tight
+           gap within the pair, looser gap between pairs (via .pd-price-list
+           above) so it chunks visually instead of reading as a flat list. */
+        .pd-price-pair { display: flex; flex-direction: column; gap: 2px; }
+        .pd-price-row-label { font-size: 13px; color: var(--text-muted); }
+        .pd-price-row-value {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 18px;
+          font-weight: 700;
+          color: var(--text);
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+        }
+        /* Single-variant case - one bigger line instead of a sparse list,
+           since there's nothing left to differentiate rows by. */
+        .pd-price-hero {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 26px;
+          font-weight: 700;
+          color: var(--text);
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        /* Down = green, up = red - inverted from the stock-market default
+           because a lower price is the favorable outcome for a buyer. */
+        .pd-price-up { color: var(--red); }
+        .pd-price-down { color: var(--green); }
+        /* Compound selectors, not the single-class .pd-price-up/-down rules
+           above - those have equal specificity to .pd-price-row-value/
+           .pd-price-hero/.pd-trend-badge and would silently lose to them
+           based on source order alone. */
+        .pd-price-row-value.pd-price-up { color: var(--red); }
+        .pd-price-row-value.pd-price-down { color: var(--green); }
+        .pd-price-hero.pd-price-up { color: var(--red); }
+        .pd-price-hero.pd-price-down { color: var(--green); }
+        .pd-price-arrow { flex-shrink: 0; }
+        .pd-price-caption { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+        .pd-price-empty { font-size: 15px; color: var(--text-muted); flex: 1; text-align: right; }
+
+        /* Sparkline + its aggregate delta live together, right-aligned in
+           the card, close to each other since they're the same number
+           expressed two ways (figure + shape). */
+        /* min-width matches the sparkline SVG's own fixed width (140px) -
+           without a floor here, flex-shrink can squash it toward 0 instead
+           of ever triggering .pd-price-card's wrap. */
+        .pd-sparkline-block { flex: 1 1 160px; min-width: 160px; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+        .pd-trend-badge {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 13px;
+          font-weight: 600;
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+        }
+        .pd-trend-badge.pd-price-up { color: var(--red); }
+        .pd-trend-badge.pd-price-down { color: var(--green); }
+        .sparkline-wrap { position: relative; }
+        .sparkline-svg { display: block; cursor: crosshair; }
+        /* Transient hover-only tooltip - same named exception as
+           .navrail-tooltip, not a content-floor violation. */
+        .sparkline-tooltip {
+          position: absolute;
+          bottom: 100%;
+          transform: translateX(-50%);
+          margin-bottom: 8px;
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          border-radius: 6px;
+          padding: 5px 9px;
+          font-size: 12px;
+          white-space: nowrap;
+          pointer-events: none;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 1px;
+          z-index: 5;
+          box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+        }
+        .sparkline-tooltip-sub { color: var(--text-muted); font-size: 12px; }
+
+        /* WATCHLIST STRIP - always visible, no expand/collapse. Chips wrap
+           onto additional rows instead of scrolling. */
+        .wl-strip {
+          flex-shrink: 0;
+          border-bottom: 1px solid var(--line);
+          background: var(--surface);
+          padding: 18px 26px;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .wl-strip-head { display: flex; align-items: center; }
+        .wl-strip-title { font-weight: 600; font-size: 15px; }
+        .wl-strip-empty { color: var(--text-muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+        .wl-empty-icon { color: var(--text-faint); flex-shrink: 0; }
+        .wl-strip-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .wl-chip {
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          border-radius: 20px;
+          padding: 5px 10px 5px 5px;
+          color: var(--text);
+          transition: border-color 0.15s;
+        }
+        .wl-chip:hover { border-color: var(--text-faint); }
+        .wl-chip-thumb {
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          background: var(--surface);
+          color: var(--text-faint);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          overflow: hidden;
+          flex-shrink: 0;
+        }
+        .wl-chip-thumb.has-photo { background: #fff; }
+        .wl-chip-thumb img { width: 100%; height: 100%; object-fit: contain; }
+        .wl-chip-name { font-size: 13px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .wl-chip-price {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-muted);
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          flex-shrink: 0;
+        }
+        .wl-chip-price.pd-price-up { color: var(--red); }
+        .wl-chip-price.pd-price-down { color: var(--green); }
+        /* Red - the one OOS flag color, reused not invented. */
+        .wl-chip-badge {
+          flex-shrink: 0;
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--red);
+          background: rgba(var(--red-rgb), 0.12);
+          border-radius: 10px;
+          padding: 2px 8px;
+        }
+        .wl-chip-remove { color: var(--text-faint); display: flex; padding: 2px; border-radius: 50%; flex-shrink: 0; }
+        .wl-chip-remove:hover { color: var(--text); background: var(--surface); }
+
+        /* ORDER BOOK SIDEBAR - collapsed by default (56px icon+count rail)
+           so it stays "always visible" per the brief without permanently
+           taking width from Product Detail; expands on demand. */
+        .orderbook-sidebar {
+          flex-shrink: 0;
+          background: var(--surface);
+          border-left: 1px solid var(--line);
+          display: flex;
+          flex-direction: column;
+          min-height: 0;
+          width: 56px;
+          transition: width 0.2s ease;
+        }
+        .orderbook-sidebar.is-expanded { width: 360px; }
+        .orderbook-header {
+          flex-shrink: 0;
+          background: transparent;
+          border: none;
+          border-bottom: 1px solid var(--line);
+          color: var(--text);
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 16px;
+          width: 100%;
+        }
+        .orderbook-sidebar:not(.is-expanded) .orderbook-header { flex-direction: column; padding: 16px 0; gap: 10px; }
+        .orderbook-icon { flex-shrink: 0; color: var(--text-muted); }
+        .orderbook-title { font-weight: 600; font-size: 14px; flex: 1; }
+        .orderbook-count {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 13px;
+          color: var(--text);
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          padding: 2px 8px;
+          border-radius: 20px;
+        }
+        .orderbook-empty { padding: 16px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+        .orderbook-list { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
+        .orderbook-footer { flex-shrink: 0; padding: 12px 16px; border-top: 1px solid var(--line); }
+        .orderbook-submit { width: 100%; justify-content: center; }
+        /* Only genuine "update" event available without a live backend -
+           flashes when the user's own new bid lands in the list. Reuses
+           the green alpha token (positive action), not a new color. */
+        @keyframes orderbook-flash {
+          0% { background: rgba(var(--green-rgb), 0.18); }
+          100% { background: transparent; }
+        }
+        .orderbook-line.is-flash { animation: orderbook-flash 1.3s ease-out; border-radius: 6px; }
         .activity-note {
           display: flex;
           align-items: center;
@@ -2166,7 +3274,10 @@ export default function MarketScreen() {
           display: grid;
           grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
           gap: 10px 18px;
-          max-width: 480px;
+          /* Was 480px, which only fit 3 of the usual 4 fields (Model/
+             Network/SIM/Market) before wrapping - matches the parent's
+             actual available width instead of an arbitrary narrower cap. */
+          max-width: 600px;
         }
         .spec-row {
           display: flex;
@@ -2179,18 +3290,45 @@ export default function MarketScreen() {
           letter-spacing: 0.06em;
           color: var(--text-muted);
         }
+        /* Deliberately quiet - reference info glanced at once, not a
+           second data block competing with the price card above it. */
         .spec-value {
-          font-family: 'JetBrains Mono', monospace;
-          font-size: 15px;
-          color: var(--text);
+          font-size: 13px;
+          font-weight: 400;
+          color: var(--text-muted);
         }
 
-        .vtable-wrap { flex: 1; overflow-y: auto; padding: 0 26px 26px; max-width: 1100px; }
+        /* overflow-x + a min-width on the header/rows below - the Order
+           Book sidebar now shares this column's width, and on narrower
+           desktop viewports (~1280-1366px laptops) with Order Book
+           expanded, the 6-column table's fr-unit tracks would otherwise
+           get squeezed into overlapping/illegible columns. Scrolling
+           horizontally within its own panel, rather than visually
+           breaking, is the standard trading-table pattern for this. */
+        .vtable-wrap { flex: 1; overflow-y: auto; overflow-x: auto; padding: 0 26px 26px; max-width: 1100px; }
+        .vtable-title {
+          font-weight: 600;
+          font-size: 15px;
+          /* No left/right padding - matches .vtable-header/.vrow (fixed
+             earlier) so the text sits flush with the box edge instead of
+             12px inside it. The box edge was always correctly positioned;
+             it was the padding pushing the visible text inward that I
+             missed by measuring the div's rect instead of the text. */
+          padding: 20px 0 12px;
+          position: sticky;
+          left: 0;
+        }
         .vtable-header {
           display: grid;
           grid-template-columns: 0.85fr 1.1fr 1fr 0.7fr 0.95fr 78px;
+          min-width: 640px;
           gap: 10px;
-          padding: 14px 12px 12px;
+          /* No left/right inset beyond .vtable-wrap's own 26px padding -
+             a stray extra 12px here (and on .vrow below) was indenting
+             the table 12px further than .vtable-title and .news-section,
+             so column headers/rows didn't line up with either the "Place
+             Your Bid" title above or "Market News" below. */
+          padding: 14px 0 12px;
           border-bottom: 1px solid var(--line);
           font-size: 13px;
           text-transform: uppercase;
@@ -2201,66 +3339,16 @@ export default function MarketScreen() {
           background: var(--canvas);
           align-items: end;
         }
-        .vtable-th-group { display: flex; flex-direction: column; gap: 3px; }
-        .vtable-group-label {
-          font-size: 13px;
-          font-weight: 700;
-          letter-spacing: 0.08em;
-          color: var(--text);
-        }
+        /* Section title above the table, not a "Your Bid" column-group
+           label - see the .vtable-title rule near .vtable-wrap. */
         .vrow-bid-start { padding-left: 12px; }
-        /* Sized/positioned via grid lines (last 3 tracks - Bid Qty, Target
-           Price, Add - always the last 3 regardless of how many reference
-           columns are shown, via negative grid-line indices), but taken out
-           of grid flow with position:absolute so it can't shove the other
-           auto-placed cells onto a second row (a real in-flow grid item
-           spanning those columns collides with their auto-placement and
-           grid wraps them - this avoids that entirely). No bleed margin and
-           no radius - stays exactly within its own row's content area so it
-           never overlaps the row-divider border or spills past the table,
-           and a low-opacity wash (not a solid surface color) keeps it a
-           quiet hint rather than a competing panel. */
-        /* Explicit top/bottom/left/right, not inset:0 - grid-row:1 alone
-           only sizes this to the content track's own height (the input's
-           rendered height), not the row's padding, which is exactly why the
-           row's own vertical padding was showing through as a black gap at
-           the top/bottom. Bleeding by the row's own padding (13px vert /
-           12px horiz on .vrow, 14px/12px on .vtable-header) brings it flush
-           with the row's border edge - filling the full row without
-           exceeding it. left/right are asymmetric on purpose: -6px on the
-           left (breathing room before the Bid Qty input) and the full 12px
-           on the right (breathing room after the Add button, landing
-           exactly on the row's own edge, not beyond it). */
-        .vrow-bid-bg {
-          position: absolute;
-          top: -13px;
-          bottom: -1px;
-          left: -6px;
-          right: -12px;
-          grid-column: -4 / -1;
-          grid-row: 1;
-          background: rgba(255, 255, 255, 0.04);
-          z-index: 0;
-        }
-        .vtable-header .vrow-bid-bg { top: -14px; bottom: -1px; }
-        /* Every other cell must be explicitly lifted above the absolutely-
-           positioned bg - position:static siblings paint below a positioned
-           element regardless of DOM order, so without this the bg (even
-           though it's declared first) would cover the qty input/Add button. */
-        .vrow > *:not(.vrow-bid-bg),
-        .vtable-header > *:not(.vrow-bid-bg) {
-          position: relative;
-          z-index: 1;
-        }
-        /* .vtable-header already establishes its own containing block via
-           position:sticky elsewhere - doesn't need position:relative too. */
-        .vrow { position: relative; }
         .vrow {
           display: grid;
           grid-template-columns: 0.85fr 1.1fr 1fr 0.7fr 0.95fr 78px;
+          min-width: 640px;
           gap: 10px;
           align-items: center;
-          padding: 13px 12px;
+          padding: 13px 0;
           border-bottom: 1px solid var(--line-soft);
         }
         .vrow:hover { background: rgba(255,255,255,0.015); }
@@ -2281,7 +3369,6 @@ export default function MarketScreen() {
           flex-shrink: 0;
           border: 1px solid var(--line);
         }
-        .vrow-selling { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; }
         .vinput {
           width: 100%;
           background: var(--surface);
@@ -2329,16 +3416,142 @@ export default function MarketScreen() {
         }
         .addbtn.is-ready:hover { background: rgba(var(--amber-rgb), 0.18); }
 
-        /* TRAY */
-        .tray-bar {
+        /* MARKET NEWS - horizontal "ticker" card row, sits inside
+           .vtable-wrap below the bid table (not the Order Book sidebar -
+           too narrow for this many-cards-visible layout). Fully mocked.
+           Bleeds past .vtable-wrap's own 26px side padding (negative
+           margin, then re-adds the padding on the inside) so this section's
+           top border reads as one deliberate full-width section break,
+           not indented to match the table's inset content width. The last
+           table row's own border-bottom is turned off (below) so there's
+           only ever one divider here, not two stacked close together. */
+        .news-section { margin: 28px -26px 0; padding: 20px 26px 0; border-top: 1px solid var(--line); }
+        /* Not :last-of-type - .news-section is also a sibling <div>, so
+           "last div of type" is the news section itself, not the last
+           row. isLast is passed explicitly by VariantRow instead. */
+        .vrow-last { border-bottom: none; }
+        .news-section-head { margin-bottom: 12px; }
+        .news-section-title { font-weight: 600; font-size: 15px; }
+        .news-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px; }
+        .news-card {
+          flex: 0 0 240px;
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .news-card-meta { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+        .news-card-source { font-weight: 500; }
+        .news-card-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
+        .news-card-headline {
+          font-size: 14px;
+          font-weight: 500;
+          color: var(--text);
+          line-height: 1.35;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .news-card-gloss { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+        /* Muted, not a brand color - this is a content label, not a
+           selection/live/success/error state, so none of the one-job
+           colors apply to it. */
+        .news-card-gloss-label {
+          display: block;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--text-faint);
+          margin-bottom: 2px;
+        }
+
+        /* COMMAND PALETTE (Cmd/Ctrl+K) */
+        .cmdk-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.5);
+          z-index: 100;
+          display: flex;
+          align-items: flex-start;
+          justify-content: center;
+          padding-top: 14vh;
+        }
+        .cmdk-panel {
+          width: 560px;
+          max-width: calc(100vw - 40px);
+          max-height: 60vh;
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+        .cmdk-input-row {
           flex-shrink: 0;
-          border-top: 1px solid var(--line);
-          background: var(--surface);
           display: flex;
           align-items: center;
-          justify-content: space-between;
-          padding: 12px 26px;
+          gap: 10px;
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--line);
         }
+        .cmdk-input-icon { color: var(--text-faint); flex-shrink: 0; }
+        .cmdk-input {
+          flex: 1;
+          background: none;
+          border: none;
+          outline: none;
+          color: var(--text);
+          font-size: 15px;
+          font-family: 'Inter', sans-serif;
+        }
+        .cmdk-input::placeholder { color: var(--text-muted); }
+        .cmdk-esc {
+          flex-shrink: 0;
+          font-size: 12px;
+          color: var(--text-muted);
+          border: 1px solid var(--line);
+          border-radius: 4px;
+          padding: 2px 6px;
+        }
+        .cmdk-results { overflow-y: auto; padding: 8px; }
+        .cmdk-empty { padding: 16px 12px; font-size: 13px; color: var(--text-muted); }
+        .cmdk-item {
+          width: 100%;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          background: none;
+          border: none;
+          border-radius: 6px;
+          padding: 9px 10px;
+          color: var(--text);
+          text-align: left;
+          cursor: pointer;
+        }
+        .cmdk-item:hover { background: var(--surface); }
+        .cmdk-item-thumb {
+          flex-shrink: 0;
+          width: 28px;
+          height: 28px;
+          border-radius: 6px;
+          background: var(--surface);
+          color: var(--text-faint);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          overflow: hidden;
+        }
+        .cmdk-item-thumb img { width: 100%; height: 100%; object-fit: contain; }
+        .cmdk-item-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cmdk-item-brand { flex-shrink: 0; font-size: 12px; color: var(--text-muted); }
+
+        /* TRAY */
         .tray-summary { display: flex; align-items: center; gap: 10px; }
         .tray-count {
           font-family: 'JetBrains Mono', monospace;
@@ -2371,20 +3584,6 @@ export default function MarketScreen() {
         }
         .tray-btn:hover { filter: brightness(1.08); }
         .tray-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
-        .tray-panel {
-          position: absolute;
-          right: 0;
-          bottom: 57px;
-          width: 380px;
-          max-height: 60vh;
-          background: var(--surface-raised);
-          border: 1px solid var(--line);
-          border-radius: 10px 0 0 0;
-          box-shadow: 0 -8px 30px rgba(0,0,0,0.4);
-          display: flex;
-          flex-direction: column;
-        }
         .tray-panel-head {
           display: flex;
           justify-content: space-between;
@@ -2394,7 +3593,6 @@ export default function MarketScreen() {
         }
         .tray-panel-title { font-weight: 600; font-size: 15px; }
         .tray-panel-close { background: transparent; border: none; color: var(--text-faint); display: flex; }
-        .tray-list { flex: 1; overflow-y: auto; padding: 8px; }
         .tray-line {
           display: flex;
           justify-content: space-between;
@@ -2487,6 +3685,27 @@ export default function MarketScreen() {
         }
         .bottom-tab.is-active { color: var(--blue); }
         .bottom-tab-label { font-size: 10.5px; font-weight: 500; }
+        .bottom-tab-icon-wrap { position: relative; display: flex; }
+        /* 10px, below the usual 13px floor - explicit named exception, same
+           class as keyboard-shortcut hint badges: a small notification
+           count, not readable content the user scans to make a decision. */
+        .bottom-tab-badge {
+          position: absolute;
+          top: -4px;
+          right: -7px;
+          background: var(--blue);
+          color: #fff;
+          font-size: 10px;
+          font-weight: 700;
+          border-radius: 8px;
+          min-width: 15px;
+          height: 15px;
+          padding: 0 3px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          line-height: 1;
+        }
 
         .mobile-search-bar {
           flex-shrink: 0;
@@ -2549,6 +3768,7 @@ export default function MarketScreen() {
         }
         .pcard:active { transform: scale(0.98); }
         .pcard-thumb {
+          position: relative;
           width: 100%;
           aspect-ratio: 1;
           border-radius: 7px;
@@ -2561,6 +3781,26 @@ export default function MarketScreen() {
         }
         .pcard-thumb.has-photo { background: #fff; }
         .pcard-thumb-img { width: 100%; height: 100%; object-fit: contain; }
+        /* Floating over the thumbnail's top-right corner - standard mobile
+           ecommerce placement, keeps the card body below free of an extra
+           row just for this toggle. Blue, same reasoning as .prow-star -
+           persistent selection state, not an action or live signal. */
+        .pcard-star {
+          position: absolute;
+          top: 6px;
+          right: 6px;
+          background: rgba(0,0,0,0.45);
+          border: none;
+          border-radius: 50%;
+          width: 26px;
+          height: 26px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+          z-index: 1;
+        }
+        .pcard-star.is-active { color: var(--blue); background: rgba(0,0,0,0.6); }
         .pcard-body { display: flex; flex-direction: column; gap: 6px; }
         .pcard-name {
           font-size: 15px;
@@ -2627,7 +3867,188 @@ export default function MarketScreen() {
           align-items: center;
           justify-content: center;
         }
+        /* Mirrors .mobile-hero-back - same floating treatment, top-right
+           instead of top-left. */
+        .mobile-hero-star {
+          position: absolute;
+          top: calc(14px + env(safe-area-inset-top, 0px));
+          right: 14px;
+          z-index: 3;
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          background: rgba(10,11,13,0.55);
+          backdrop-filter: blur(4px);
+          border: none;
+          color: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .mobile-hero-star.is-active { color: var(--blue); }
         .mobile-detail-scroll { height: 100%; overflow-y: auto; }
+
+        /* WATCHLIST (mobile) - full-screen page, not an inline strip. Same
+           fixed-overlay pattern as .mobile-detail-page, but with a normal
+           in-flow header bar instead of a button floating over a hero
+           image, since there's no hero here. */
+        .mobile-watchlist-page {
+          position: fixed;
+          inset: 0;
+          background: var(--canvas);
+          z-index: 40;
+          display: flex;
+          flex-direction: column;
+        }
+        .mobile-watchlist-header {
+          flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 12px 16px;
+          background: var(--surface);
+          border-bottom: 1px solid var(--line);
+        }
+        .mobile-watchlist-back {
+          background: transparent;
+          border: none;
+          color: var(--text);
+          display: flex;
+          align-items: center;
+          padding: 4px;
+          margin-left: -4px;
+        }
+        .mobile-watchlist-title { font-weight: 600; font-size: 16px; }
+        .mobile-watchlist-scroll { flex: 1; overflow-y: auto; padding: 16px; }
+        .wl-empty-state {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          padding: 56px 32px 32px;
+        }
+        .wl-empty-illustration {
+          position: relative;
+          width: 140px;
+          height: 140px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 20px;
+        }
+        .wl-empty-card {
+          width: 120px;
+          height: 120px;
+          border-radius: 14px;
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          padding: 14px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .wl-empty-card-thumb { flex: 1; border-radius: 8px; background: var(--surface); }
+        .wl-empty-card-lines { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+        .wl-empty-card-line { height: 7px; border-radius: 4px; background: var(--surface); }
+        .wl-empty-card-line.short { width: 60%; }
+        .wl-empty-star-wrap {
+          position: absolute;
+          top: 4px;
+          right: 4px;
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        /* Blue, matching the real star's active-state color - this
+           illustration depicts the actual control, not a generic graphic,
+           so reusing blue here is representational, not decorative. */
+        .wl-empty-star { position: relative; z-index: 2; color: var(--blue); }
+        .wl-empty-ripple {
+          position: absolute;
+          inset: 0;
+          border-radius: 50%;
+          border: 1.5px solid var(--blue);
+          opacity: 0;
+          animation: wlEmptyRipple 2.2s ease-out infinite;
+        }
+        .wl-empty-ripple-delay { animation-delay: 1.1s; }
+        @keyframes wlEmptyRipple {
+          0% { transform: scale(0.5); opacity: 0.6; }
+          70% { opacity: 0; }
+          100% { transform: scale(1.7); opacity: 0; }
+        }
+        .wl-empty-heading { font-size: 17px; font-weight: 700; color: var(--text); }
+        .wl-empty-copy { font-size: 14px; color: var(--text-muted); line-height: 1.5; max-width: 280px; margin: 6px 0 0; }
+        /* Amber - same job as every other actionable CTA button. */
+        .wl-empty-cta {
+          margin-top: 18px;
+          background: var(--amber);
+          color: #14110b;
+          border: none;
+          border-radius: 8px;
+          padding: 10px 22px;
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .mobile-watchlist-list { display: flex; flex-direction: column; gap: 10px; }
+        .mwl-item {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          background: var(--surface);
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 10px;
+        }
+        .mwl-item-thumb {
+          flex-shrink: 0;
+          width: 48px;
+          height: 48px;
+          border-radius: 7px;
+          background: var(--surface-raised);
+          color: var(--text-faint);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          overflow: hidden;
+        }
+        .mwl-item-thumb.has-photo { background: #fff; }
+        .mwl-item-thumb img { width: 100%; height: 100%; object-fit: contain; }
+        .mwl-item-body { flex: 1; min-width: 0; }
+        .mwl-item-name {
+          font-size: 14px;
+          font-weight: 500;
+          color: var(--text);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          margin-bottom: 4px;
+        }
+        .mwl-item-meta { display: flex; align-items: center; gap: 8px; }
+        .mwl-item-price {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-muted);
+          display: flex;
+          align-items: center;
+          gap: 3px;
+        }
+        .mwl-item-price.pd-price-up { color: var(--red); }
+        .mwl-item-price.pd-price-down { color: var(--green); }
+        .mwl-item-badge {
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--red);
+          background: rgba(var(--red-rgb), 0.12);
+          border-radius: 10px;
+          padding: 2px 8px;
+        }
+        /* Blue, same reasoning as .prow-star.is-active - persistent
+           selection state, not an action or live signal. */
+        .mwl-item-star { background: transparent; border: none; color: var(--blue); display: flex; flex-shrink: 0; padding: 4px; }
         /* Bottom padding is set inline from the measured .mobile-footer
            height (via useElementHeight) instead of a guessed constant. */
         .mobile-detail-body { padding: 0 16px 16px; }
@@ -2672,8 +4093,13 @@ export default function MarketScreen() {
         }
         .mobile-activity-wrap:has(.activity-note),
         .mobile-activity-wrap:has(.mobile-last-bid-strip) { margin-top: 16px; }
-        .mobile-detail-body > .vcard-single,
         .mobile-detail-body > .section-label { margin-top: 28px; }
+        /* Was 28px (matching .section-label) from when this sat directly
+           under the activity signals - now it always follows a "Place
+           Your Bid" label instead, so it should match .vcard-list's
+           tighter label-to-content spacing (8px), not repeat the label's
+           own top margin. */
+        .mobile-detail-body > .vcard-single { margin-top: 8px; }
 
         /* Compact replacement for the desktop .last-bid-note card - keeps
            the "Last bid" label and a grouping chip so the status pill and
@@ -2721,21 +4147,47 @@ export default function MarketScreen() {
           color: var(--amber);
         }
 
-        .vcard-price-block { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
-        .vcard-price-label { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
-
         .vcard-single { padding: 14px; }
-        .vcard-single-price-row {
-          display: flex;
-          align-items: baseline;
-          justify-content: space-between;
-          padding-bottom: 12px;
-          margin-bottom: 12px;
-          border-bottom: 1px solid var(--line-soft);
-        }
-        .vcard-single-price-row .vcard-price-label { font-size: 13px; }
-        .vcard-price-lg { font-size: 15px; font-weight: 600; color: var(--text); }
         .vcard-single .vcard-form { padding: 0; border-top: none; }
+
+        /* REFERENCE PRICE (mobile) - stacked vertically, not the desktop
+           side-by-side grid; no spare width for that on a phone. Border
+           only, no fill - same reasoning as desktop's .pd-price-card. */
+        .mp-price-card {
+          margin-top: 8px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 14px;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+        .mp-price-list { display: flex; flex-direction: column; gap: 10px; }
+        .mp-price-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+        .mp-trend-block {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+          padding-top: 14px;
+          border-top: 1px solid var(--line-soft);
+        }
+
+        /* MARKET NEWS (mobile) - same "ticker" card concept as desktop,
+           two cards visible with snap-scroll instead of desktop's 3-4. */
+        .mp-news-row {
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          margin-top: 8px;
+          scroll-snap-type: x mandatory;
+          /* Scroll still works via touch/drag - just hides the visible
+             scrollbar track, which read as a stray UI element here. */
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .mp-news-row::-webkit-scrollbar { display: none; }
+        .mp-news-card { flex: 0 0 calc(50% - 5px); scroll-snap-align: start; }
 
         .vcard-list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
         .vcard {
@@ -2758,8 +4210,6 @@ export default function MarketScreen() {
         .vcard-head-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
         .vcard-swatch { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex-shrink: 0; }
         .vcard-title { font-size: 15px; font-weight: 500; }
-        .vcard-head-side { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-        .vcard-price { font-size: 13px; color: var(--text-muted); }
         .vcard-chevron { color: var(--text-faint); transition: transform 0.15s; }
         .vcard-chevron.is-open { transform: rotate(90deg); }
         .vcard-form {
@@ -2866,6 +4316,8 @@ export default function MarketScreen() {
         }
       `}</style>
 
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={jumpToProduct} />
+
       {!isCompact && <Ticker />}
 
       {!isCompact && (
@@ -2912,6 +4364,8 @@ export default function MarketScreen() {
                     product={p}
                     isActive={selectedProduct && p.id === selectedProduct.id}
                     onClick={() => setSelectedProductId(p.id)}
+                    isWatchlisted={watchlist.has(p.id)}
+                    onToggleWatchlist={toggleWatchlist}
                   />
                 ))}
                 {filteredProducts.length === 0 && (
@@ -2922,103 +4376,91 @@ export default function MarketScreen() {
               </div>
             </div>
 
-          <div className="detail" style={{ position: "relative" }}>
-            {selectedProduct && (() => {
-              const hasStorage = productHasStorage(selectedProduct);
-              const hasColor = productHasColor(selectedProduct);
-              const gridTemplate = buildVariantGridTemplate(hasStorage, hasColor);
-              return (
-                <>
-                  <div className="detail-head">
-                    <div className="detail-eyebrow">
-                      {selectedProduct.brand} · {CATEGORIES.find((c) => c.id === selectedProduct.category)?.name}
-                    </div>
-                    <h2 className="detail-title">{selectedProduct.name}</h2>
-                    <LastBidNote product={selectedProduct} />
-                  </div>
+          <div className="workspace">
+            <WatchlistStrip
+              products={watchlistedProducts}
+              onSelect={setSelectedProductId}
+              onToggleWatchlist={toggleWatchlist}
+            />
 
-                  <div className="detail-overview">
-                    <DetailHero product={selectedProduct} />
-                    <div className="detail-overview-side">
-                      <ActivityNote product={selectedProduct} />
-                      <SpecSheet product={selectedProduct} />
-                    </div>
-                  </div>
-
-                  <div className="vtable-wrap">
-                    <div className="vtable-header" style={{ gridTemplateColumns: gridTemplate }}>
-                      <div className="vrow-bid-bg" />
-                      {hasStorage && <div>Storage</div>}
-                      {hasColor && <div>Color</div>}
-                      <div>Selling Price</div>
-                      <div className="vtable-th-group vrow-bid-start">
-                        <div className="vtable-group-label">Your Bid</div>
-                        <div>Bid Qty</div>
-                      </div>
-                      <div>Target Price</div>
-                      <div></div>
-                    </div>
-                    {selectedProduct.variants.map((v, i) => (
-                      <VariantRow
-                        key={i}
-                        variant={v}
-                        onAdd={addToTray}
-                        showStorage={hasStorage}
-                        showColor={hasColor}
-                        gridTemplate={gridTemplate}
-                      />
-                    ))}
-                  </div>
-                </>
-              );
-            })()}
-
-            {tray.length > 0 && (
-              <div className="tray-bar">
-                <div className="tray-summary">
-                  <span className="tray-count tabular">{tray.length}</span>
-                  <span className="tray-label">item{tray.length > 1 ? "s" : ""} ready to submit</span>
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button
-                    className="tray-btn"
-                    style={{ background: "transparent", color: "var(--text-muted)", border: "1px solid var(--line)" }}
-                    onClick={() => setTrayOpen((o) => !o)}
-                  >
-                    {trayOpen ? "Hide" : "Review"}
-                  </button>
-                  <button className="tray-btn" onClick={submitAll}>
-                    Submit All Bids <ChevronRight size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {trayOpen && tray.length > 0 && (
-              <div className="tray-panel">
-                <div className="tray-panel-head">
-                  <span className="tray-panel-title">Pending Bids ({tray.length})</span>
-                  <button className="tray-panel-close" onClick={() => setTrayOpen(false)}>
-                    <X size={16} />
-                  </button>
-                </div>
-                <div className="tray-list">
-                  {tray.map((t) => (
-                    <div className="tray-line" key={t.key}>
-                      <div className="tray-line-main">
-                        <div className="tray-line-name">{t.productName}</div>
-                        <div className="tray-line-meta tabular">
-                          {t.storage !== "—" ? `${t.storage} · ` : ""}{t.color !== "—" ? `${t.color} · ` : ""}Qty {t.qty} · ${t.price}
+            <div className="workspace-row">
+              <div className="detail">
+                {selectedProduct && (() => {
+                  const hasStorage = productHasStorage(selectedProduct);
+                  const hasColor = productHasColor(selectedProduct);
+                  const gridTemplate = buildVariantGridTemplate(hasStorage, hasColor);
+                  return (
+                    <>
+                      <div className="detail-head">
+                        <div className="detail-identity">
+                          <div className="detail-thumb-compact">
+                            <DetailHero product={selectedProduct} />
+                          </div>
+                          <div className="detail-identity-text">
+                            <div className="detail-eyebrow">
+                              {selectedProduct.brand} · {CATEGORIES.find((c) => c.id === selectedProduct.category)?.name}
+                            </div>
+                            <h2 className="detail-title">{selectedProduct.name}</h2>
+                            {/* Both one-line signals stack directly under the
+                                title now, ahead of the price card. */}
+                            <LastBidNote product={selectedProduct} />
+                            <ActivityNote product={selectedProduct} />
+                          </div>
+                          <button
+                            className={"detail-watchlist-cta" + (watchlist.has(selectedProduct.id) ? " is-active" : "")}
+                            title={watchlist.has(selectedProduct.id) ? "Remove from watchlist" : "Add to watchlist"}
+                            onClick={() => toggleWatchlist(selectedProduct.id)}
+                          >
+                            <Star size={15} strokeWidth={2} fill={watchlist.has(selectedProduct.id) ? "currentColor" : "none"} />
+                            Watchlist
+                          </button>
                         </div>
                       </div>
-                      <button className="tray-line-remove" onClick={() => removeFromTray(t.key)}>
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
+
+                      <div className="detail-overview">
+                        <ProductPriceHeader product={selectedProduct} />
+                        <SpecSheet product={selectedProduct} />
+                      </div>
+
+                      <div className="vtable-wrap">
+                        {/* Section title, not a "Your Bid" column-group label - the
+                            whole table is bidding UI now that reference price moved
+                            into the price card above, so one title covers it all. */}
+                        <div className="vtable-title">Place Your Bid</div>
+                        <div className="vtable-header" style={{ gridTemplateColumns: gridTemplate }}>
+                          {hasStorage && <div>Storage</div>}
+                          {hasColor && <div>Color</div>}
+                          <div className="vrow-bid-start">Bid Qty</div>
+                          <div>Target Price</div>
+                          <div></div>
+                        </div>
+                        {selectedProduct.variants.map((v, i) => (
+                          <VariantRow
+                            key={i}
+                            variant={v}
+                            onAdd={addToTray}
+                            showStorage={hasStorage}
+                            showColor={hasColor}
+                            gridTemplate={gridTemplate}
+                            isLast={i === selectedProduct.variants.length - 1}
+                          />
+                        ))}
+                        <MarketNewsSection product={selectedProduct} />
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
-            )}
+
+              <OrderBookSidebar
+                tray={tray}
+                expanded={trayOpen}
+                onToggleExpanded={() => setTrayOpen((o) => !o)}
+                onRemove={removeFromTray}
+                onSubmit={submitAll}
+                flashKey={flashKey}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -3030,7 +4472,20 @@ export default function MarketScreen() {
           <Ticker collapsed={tickerCollapsed} compactLabel />
           <MobileTopBar themeDark={themeDark} onToggleTheme={toggleTheme} />
 
-          {!mobileDetailOpen && (
+          {mobileWatchlistOpen && (
+            <MobileWatchlistPage
+              products={watchlistedProducts}
+              onBack={() => setMobileWatchlistOpen(false)}
+              onSelect={(id) => {
+                setSelectedProductId(id);
+                setMobileWatchlistOpen(false);
+                setMobileDetailOpen(true);
+              }}
+              onToggleWatchlist={toggleWatchlist}
+            />
+          )}
+
+          {!mobileDetailOpen && !mobileWatchlistOpen && (
             <div className="mobile-search-bar">
               <div className="searchbar">
                 <Search size={16} />
@@ -3046,7 +4501,7 @@ export default function MarketScreen() {
             </div>
           )}
 
-          {!mobileDetailOpen && (
+          {!mobileDetailOpen && !mobileWatchlistOpen && (
             <div className="mobile-plp">
               <div className="mobile-plp-scroll" style={{ paddingBottom: footerHeight + 20 }} onScroll={handlePlpScroll}>
                 <div className="mobile-scroll-row">
@@ -3062,6 +4517,8 @@ export default function MarketScreen() {
                     <ProductCard
                       key={p.id}
                       product={p}
+                      isWatchlisted={watchlist.has(p.id)}
+                      onToggleWatchlist={toggleWatchlist}
                       onClick={() => {
                         setSelectedProductId(p.id);
                         setMobileDetailOpen(true);
@@ -3084,6 +4541,8 @@ export default function MarketScreen() {
               onBack={() => setMobileDetailOpen(false)}
               onAdd={addToTray}
               footerHeight={footerHeight}
+              isWatchlisted={watchlist.has(selectedProduct.id)}
+              onToggleWatchlist={toggleWatchlist}
             />
           )}
 
@@ -3103,7 +4562,19 @@ export default function MarketScreen() {
                 </button>
               </div>
             )}
-            <BottomTabBar active="market" />
+            <BottomTabBar
+              active={mobileWatchlistOpen ? "watchlist" : "market"}
+              watchlistCount={watchlistedProducts.length}
+              onSelect={(id) => {
+                if (id === "watchlist") {
+                  setMobileDetailOpen(false);
+                  setMobileWatchlistOpen(true);
+                } else if (id === "market") {
+                  setMobileWatchlistOpen(false);
+                  setMobileDetailOpen(false);
+                }
+              }}
+            />
           </div>
         </>
       )}
