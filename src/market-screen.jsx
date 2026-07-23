@@ -25,6 +25,7 @@ import {
   Star,
   TrendingUp,
   TrendingDown,
+  Mic,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------
@@ -415,8 +416,11 @@ function scrollCardIntoView(cardEl, containerEl, footerHeight) {
    SMALL COMPONENTS
 --------------------------------------------------------------------- */
 
-function NavRail({ active, collapsed, onToggleCollapse, themeDark, onToggleTheme }) {
-  const items = NAV_ITEMS;
+function NavRail({ active, collapsed, onToggleCollapse, themeDark, onToggleTheme, onSelect }) {
+  // Watchlist is mobile/tablet-only - desktop already shows it upfront as
+  // the always-visible strip above the workspace, so it doesn't need a
+  // nav entry too.
+  const items = NAV_ITEMS.filter((it) => it.id !== "watchlist");
   return (
     <div className={"navrail" + (collapsed ? " is-collapsed" : "")}>
       <div className="navrail-top">
@@ -434,6 +438,7 @@ function NavRail({ active, collapsed, onToggleCollapse, themeDark, onToggleTheme
               key={it.id}
               className={"navrail-item" + (isActive ? " is-active" : "")}
               title={collapsed ? it.label : undefined}
+              onClick={onSelect ? () => onSelect(it.id) : undefined}
             >
               <Icon size={19} strokeWidth={1.75} />
               {!collapsed && <span className="navrail-label">{it.label}</span>}
@@ -1101,13 +1106,12 @@ function ProductPriceHeader({ product }) {
   const singleDirectionClass = singleTrend?.direction === "up" ? " pd-price-up" : singleTrend?.direction === "down" ? " pd-price-down" : "";
 
   return (
-    <>
-      {/* Flush section title, not nested inside the bordered card - same
-         treatment as "Place Your Bid"/"Market News" below it. Living
-         inside the card meant it inherited the card's own inner padding
-         and sat ~20px deeper than every other section label on the page. */}
-      <div className="pd-price-section-label">Reference Price</div>
-      <div className="pd-price-card">
+    <div className={"pd-price-card" + (isSingleVariant ? " is-hero" : "")}>
+      {/* Title lives inside the card, same pattern as Order Book's header -
+         a card is one visual unit with its own heading, not a floating
+         label plus a separate box. */}
+      <div className="pd-price-card-title">Reference Price</div>
+      <div className="pd-price-card-body">
       <div className="pd-price-list">
         {isSingleVariant ? (
           <span className={"pd-price-hero tabular" + singleDirectionClass}>
@@ -1172,7 +1176,7 @@ function ProductPriceHeader({ product }) {
         <div className="pd-price-empty">No trend data yet</div>
       )}
       </div>
-    </>
+    </div>
   );
 }
 
@@ -1241,13 +1245,26 @@ function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate, isLa
   const [qty, setQty] = useState("");
   const [price, setPrice] = useState("");
   const [swatchFailed, setSwatchFailed] = useState(false);
-  const canAdd = Number(qty) > 0 && Number(price) > 0;
+  // No disabled state on Add - it always looks ready. Tapping it with
+  // empty fields shows exactly what's missing instead of doing nothing,
+  // which is more legible to this audience than an abstract "greyed out
+  // until valid" state (and sidesteps ever looking like another input).
+  const [qtyError, setQtyError] = useState(false);
+  const [priceError, setPriceError] = useState(false);
 
   const handleAdd = () => {
-    if (!canAdd) return;
+    const qtyValid = Number(qty) > 0;
+    const priceValid = Number(price) > 0;
+    if (!qtyValid || !priceValid) {
+      setQtyError(!qtyValid);
+      setPriceError(!priceValid);
+      return;
+    }
     onAdd({ storage: variant.storage, color: variant.color, qty: Number(qty), price: Number(price) });
     setQty("");
     setPrice("");
+    setQtyError(false);
+    setPriceError(false);
   };
 
   return (
@@ -1262,30 +1279,42 @@ function VariantRow({ variant, onAdd, showStorage, showColor, gridTemplate, isLa
         </div>
       )}
       <div className="vrow-cell">
-        <input
-          className="vinput"
-          type="number"
-          min="0"
-          placeholder="0"
-          value={qty}
-          onChange={(e) => setQty(e.target.value)}
-        />
-      </div>
-      <div className="vrow-cell">
-        <div className="vinput-price-wrap">
-          <span className="vinput-currency">$</span>
+        <div className="vrow-field-control">
           <input
-            className="vinput vinput-price"
+            className={"vinput" + (qtyError ? " has-error" : "")}
             type="number"
             min="0"
-            placeholder="0.00"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
+            placeholder="0"
+            value={qty}
+            onChange={(e) => {
+              setQty(e.target.value);
+              setQtyError(false);
+            }}
           />
+          {qtyError && <span className="vinput-error">Enter quantity</span>}
+        </div>
+      </div>
+      <div className="vrow-cell">
+        <div className="vrow-field-control">
+          <div className="vinput-price-wrap">
+            <span className="vinput-currency">$</span>
+            <input
+              className={"vinput vinput-price" + (priceError ? " has-error" : "")}
+              type="number"
+              min="0"
+              placeholder="0.00"
+              value={price}
+              onChange={(e) => {
+                setPrice(e.target.value);
+                setPriceError(false);
+              }}
+            />
+          </div>
+          {priceError && <span className="vinput-error">Enter price</span>}
         </div>
       </div>
       <div className="vrow-cell vrow-add">
-        <button className={"addbtn" + (canAdd ? " is-ready" : "")} onClick={handleAdd} disabled={!canAdd}>
+        <button className="addbtn is-ready" onClick={handleAdd}>
           <Plus size={13} strokeWidth={2.25} />
           Add
         </button>
@@ -1516,15 +1545,24 @@ function VariantCard({ variant, onAdd, showStorage, showColor, defaultExpanded, 
   const [qty, setQty] = useState("");
   const [price, setPrice] = useState("");
   const [swatchFailed, setSwatchFailed] = useState(false);
-  const canAdd = Number(qty) > 0 && Number(price) > 0;
+  const [qtyError, setQtyError] = useState(false);
+  const [priceError, setPriceError] = useState(false);
   const cardRef = useRef(null);
   const didMountRef = useRef(false);
 
   const handleAdd = () => {
-    if (!canAdd) return;
+    const qtyValid = Number(qty) > 0;
+    const priceValid = Number(price) > 0;
+    if (!qtyValid || !priceValid) {
+      setQtyError(!qtyValid);
+      setPriceError(!priceValid);
+      return;
+    }
     onAdd({ storage: variant.storage, color: variant.color, qty: Number(qty), price: Number(price), variantImage: variant.image });
     setQty("");
     setPrice("");
+    setQtyError(false);
+    setPriceError(false);
   };
 
   const toggleExpanded = () => setExpanded((e) => !e);
@@ -1562,30 +1600,42 @@ function VariantCard({ variant, onAdd, showStorage, showColor, defaultExpanded, 
         <div className="vcard-form">
           <div className="vcard-field">
             <span className="vcard-field-label">Bid Qty</span>
-            <input
-              className="vinput"
-              type="number"
-              min="0"
-              placeholder="0"
-              value={qty}
-              onChange={(e) => setQty(e.target.value)}
-            />
+            <div className="vcard-field-control">
+              <input
+                className={"vinput" + (qtyError ? " has-error" : "")}
+                type="number"
+                min="0"
+                placeholder="0"
+                value={qty}
+                onChange={(e) => {
+                  setQty(e.target.value);
+                  setQtyError(false);
+                }}
+              />
+              {qtyError && <span className="vinput-error">Enter quantity</span>}
+            </div>
           </div>
           <div className="vcard-field">
             <span className="vcard-field-label">Target Price</span>
+            <div className="vcard-field-control">
             <div className="vinput-price-wrap">
               <span className="vinput-currency">$</span>
               <input
-                className="vinput vinput-price"
+                className={"vinput vinput-price" + (priceError ? " has-error" : "")}
                 type="number"
                 min="0"
                 placeholder="0.00"
                 value={price}
-                onChange={(e) => setPrice(e.target.value)}
+                onChange={(e) => {
+                  setPrice(e.target.value);
+                  setPriceError(false);
+                }}
               />
             </div>
+            {priceError && <span className="vinput-error">Enter price</span>}
+            </div>
           </div>
-          <button className={"addbtn vcard-addbtn" + (canAdd ? " is-ready" : "")} onClick={handleAdd} disabled={!canAdd}>
+          <button className="addbtn vcard-addbtn is-ready" onClick={handleAdd}>
             <Plus size={13} strokeWidth={2.25} />
             Add
           </button>
@@ -1662,13 +1712,22 @@ function MobileHero({ product }) {
 function SingleVariantBidForm({ variant, onAdd }) {
   const [qty, setQty] = useState("");
   const [price, setPrice] = useState("");
-  const canAdd = Number(qty) > 0 && Number(price) > 0;
+  const [qtyError, setQtyError] = useState(false);
+  const [priceError, setPriceError] = useState(false);
 
   const handleAdd = () => {
-    if (!canAdd) return;
+    const qtyValid = Number(qty) > 0;
+    const priceValid = Number(price) > 0;
+    if (!qtyValid || !priceValid) {
+      setQtyError(!qtyValid);
+      setPriceError(!priceValid);
+      return;
+    }
     onAdd({ storage: variant.storage, color: variant.color, qty: Number(qty), price: Number(price), variantImage: variant.image });
     setQty("");
     setPrice("");
+    setQtyError(false);
+    setPriceError(false);
   };
 
   return (
@@ -1678,30 +1737,42 @@ function SingleVariantBidForm({ variant, onAdd }) {
       <div className="vcard-form">
         <div className="vcard-field">
           <span className="vcard-field-label">Bid Qty</span>
-          <input
-            className="vinput"
-            type="number"
-            min="0"
-            placeholder="0"
-            value={qty}
-            onChange={(e) => setQty(e.target.value)}
-          />
+          <div className="vcard-field-control">
+            <input
+              className={"vinput" + (qtyError ? " has-error" : "")}
+              type="number"
+              min="0"
+              placeholder="0"
+              value={qty}
+              onChange={(e) => {
+                setQty(e.target.value);
+                setQtyError(false);
+              }}
+            />
+            {qtyError && <span className="vinput-error">Enter quantity</span>}
+          </div>
         </div>
         <div className="vcard-field">
           <span className="vcard-field-label">Target Price</span>
-          <div className="vinput-price-wrap">
-            <span className="vinput-currency">$</span>
-            <input
-              className="vinput vinput-price"
-              type="number"
-              min="0"
-              placeholder="0.00"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-            />
+          <div className="vcard-field-control">
+            <div className="vinput-price-wrap">
+              <span className="vinput-currency">$</span>
+              <input
+                className={"vinput vinput-price" + (priceError ? " has-error" : "")}
+                type="number"
+                min="0"
+                placeholder="0.00"
+                value={price}
+                onChange={(e) => {
+                  setPrice(e.target.value);
+                  setPriceError(false);
+                }}
+              />
+            </div>
+            {priceError && <span className="vinput-error">Enter price</span>}
           </div>
         </div>
-        <button className={"addbtn vcard-addbtn" + (canAdd ? " is-ready" : "")} onClick={handleAdd} disabled={!canAdd}>
+        <button className="addbtn vcard-addbtn is-ready" onClick={handleAdd}>
           <Plus size={13} strokeWidth={2.25} />
           Add
         </button>
@@ -2118,6 +2189,262 @@ function CommandPalette({ open, onClose, onSelect }) {
   );
 }
 
+// Deterministic pattern-matching, not a real NLP/AI call - extracts
+// whatever it can (qty, price+currency, a fuzzy catalog match) from
+// free text, and never fails outright: partial input just means fewer
+// fields come back filled, left for the confirm step to catch.
+function parseVoiceRequest(text) {
+  const t = text.toLowerCase();
+  const qtyMatch = t.match(/(\d+)\s*(?:units?|qty|pcs|pieces)\b/) || t.match(/qty\s*(?:of)?\s*(\d+)/);
+  const qty = qtyMatch ? parseInt(qtyMatch[1], 10) : null;
+  const priceMatch = t.match(/(\d+(?:\.\d+)?)\s*(aed|usd|sar|dirhams?|dollars?|\$)/);
+  const price = priceMatch ? parseFloat(priceMatch[1]) : null;
+  const currencyRaw = priceMatch ? priceMatch[2] : null;
+  const currency = currencyRaw
+    ? { aed: "AED", dirham: "AED", dirhams: "AED", usd: "USD", dollar: "USD", dollars: "USD", "$": "USD", sar: "SAR" }[currencyRaw] || "AED"
+    : "AED";
+
+  let matchedProduct = null;
+  let bestScore = 0;
+  DISPLAY_PRODUCTS.forEach((p) => {
+    const words = p.name.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    const score = words.filter((w) => t.includes(w)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      matchedProduct = p;
+    }
+  });
+
+  let productText = matchedProduct ? matchedProduct.name : null;
+  if (!matchedProduct) {
+    let cleaned = text;
+    if (qtyMatch) cleaned = cleaned.replace(qtyMatch[0], "");
+    if (priceMatch) cleaned = cleaned.replace(priceMatch[0], "");
+    cleaned = cleaned.replace(/\b(i want|i need|need|request|at|unit price|please|for)\b/gi, "").trim();
+    productText = cleaned || null;
+  }
+
+  return { product: productText, matchedProduct, qty, price, currency };
+}
+
+// Idle -> listening -> confirm, all in one overlay (reuses the Cmd+K
+// palette's centered-modal chrome). Real Web Speech API transcription
+// where supported, typed fallback everywhere else - both feed the same
+// parser, so nothing here is a canned/staged demo.
+function VoiceRequestModal({ open, onClose, onMatchedConfirm, onUnmatchedSend }) {
+  // No idle "tap to start" step - opening the modal starts listening
+  // immediately (or, unsupported browsers, goes straight to the typed
+  // fallback) so there's no extra click before the thing the user
+  // actually opened this for.
+  const [phase, setPhase] = useState("listening");
+  const [finalTranscript, setFinalTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [typedText, setTypedText] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [fieldErrors, setFieldErrors] = useState({});
+  const recognitionRef = useRef(null);
+
+  const SpeechRecognitionCtor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  const startListening = () => {
+    setFinalTranscript("");
+    setInterimTranscript("");
+    setPhase("listening");
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = (e) => {
+      let final = "";
+      let interim = "";
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      setFinalTranscript(final);
+      setInterimTranscript(interim);
+    };
+    recognition.onend = () => {
+      setFinalTranscript((current) => {
+        if (current.trim()) {
+          setPhase("confirm");
+          setParsed(parseVoiceRequest(current));
+        } else {
+          setPhase("typed");
+        }
+        return current;
+      });
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
+  useEffect(() => {
+    if (open) {
+      setTypedText("");
+      setParsed(null);
+      setFieldErrors({});
+      if (SpeechRecognitionCtor) startListening();
+      else setPhase("typed");
+    } else {
+      if (recognitionRef.current) recognitionRef.current.stop();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const stopListening = () => recognitionRef.current?.stop();
+
+  const handleTypedParse = () => {
+    if (!typedText.trim()) return;
+    setPhase("confirm");
+    setParsed(parseVoiceRequest(typedText.trim()));
+  };
+
+  const updateParsed = (key, value) => setParsed((p) => ({ ...p, [key]: value }));
+
+  const handleConfirm = () => {
+    if (parsed.matchedProduct) {
+      const errors = {};
+      if (!parsed.qty) errors.qty = "Enter a quantity";
+      if (!parsed.price) errors.price = "Enter a unit price";
+      if (Object.keys(errors).length) {
+        setFieldErrors(errors);
+        return;
+      }
+      onMatchedConfirm(parsed.matchedProduct, parsed.qty, parsed.price);
+    } else {
+      if (!parsed.product) {
+        setFieldErrors({ product: "Enter what you're looking for" });
+        return;
+      }
+      onUnmatchedSend(parsed.product);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="cmdk-backdrop" onClick={onClose}>
+      <div className="voice-modal" onClick={(e) => e.stopPropagation()}>
+        {phase === "typed" && (
+          <div className="voice-idle">
+            <div className="voice-idle-icon"><Mic size={22} strokeWidth={1.8} /></div>
+            <div className="voice-idle-title">Request a product</div>
+            {!SpeechRecognitionCtor && <div className="voice-unsupported">Voice isn't supported in this browser - type it instead.</div>}
+            <div className="voice-idle-hint">
+              Try: <span className="voice-idle-eg">"10 units of Galaxy S24 at 900 AED"</span>
+            </div>
+            <div className="voice-typed-row">
+              <input
+                className="voice-typed-input"
+                placeholder="Type your request…"
+                value={typedText}
+                onChange={(e) => setTypedText(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleTypedParse()}
+                autoFocus
+              />
+              <button className="voice-typed-btn" onClick={handleTypedParse}>Parse</button>
+            </div>
+          </div>
+        )}
+
+        {phase === "listening" && (
+          <div className="voice-listening">
+            <div className="voice-ring-wrap">
+              <span className="voice-ring" />
+              <span className="voice-ring voice-ring-delay1" />
+              <span className="voice-ring voice-ring-delay2" />
+              <div className="voice-mic-core">
+                <Mic size={20} strokeWidth={2} />
+              </div>
+            </div>
+            <div className="voice-wave">
+              {Array.from({ length: 7 }).map((_, i) => <span key={i} style={{ animationDelay: `${i * 0.12}s` }} />)}
+            </div>
+            <div className="voice-transcript">
+              <span className="voice-final">{finalTranscript}</span>{" "}
+              <span className="voice-interim">{interimTranscript}</span>
+              {!finalTranscript && !interimTranscript && <span className="voice-interim">Say what you'd like to request…</span>}
+            </div>
+            <div className="voice-status">LISTENING · TAP TO STOP</div>
+            <button className="voice-stop-btn" onClick={stopListening}>Stop</button>
+          </div>
+        )}
+
+        {phase === "confirm" && parsed && parsed.matchedProduct && (
+          <>
+            <div className="confirm-head">
+              <span className="confirm-head-icon"><Mic size={16} strokeWidth={2} /></span>
+              <span className="confirm-head-title">In stock - confirm your bid</span>
+            </div>
+            <div className="confirm-body">
+              <div className="confirm-field">
+                <span className="confirm-field-label">Product</span>
+                <div className="confirm-field-static">{parsed.matchedProduct.name}</div>
+              </div>
+              <div className="confirm-field">
+                <span className="confirm-field-label">Quantity</span>
+                <input
+                  className={"confirm-field-input" + (fieldErrors.qty ? " has-error" : "")}
+                  type="number"
+                  min="0"
+                  value={parsed.qty ?? ""}
+                  placeholder="Not heard - type it"
+                  onChange={(e) => { updateParsed("qty", e.target.value ? Number(e.target.value) : null); setFieldErrors((f) => ({ ...f, qty: null })); }}
+                />
+                {fieldErrors.qty && <span className="vinput-error">{fieldErrors.qty}</span>}
+              </div>
+              <div className="confirm-field">
+                <span className="confirm-field-label">Unit Price ({parsed.currency})</span>
+                <input
+                  className={"confirm-field-input" + (fieldErrors.price ? " has-error" : "")}
+                  type="number"
+                  min="0"
+                  value={parsed.price ?? ""}
+                  placeholder="Not heard - type it"
+                  onChange={(e) => { updateParsed("price", e.target.value ? Number(e.target.value) : null); setFieldErrors((f) => ({ ...f, price: null })); }}
+                />
+                {fieldErrors.price && <span className="vinput-error">{fieldErrors.price}</span>}
+              </div>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn" onClick={onClose}>Cancel</button>
+              <button className="btn primary" onClick={handleConfirm}>Add to Order Book</button>
+            </div>
+          </>
+        )}
+
+        {phase === "confirm" && parsed && !parsed.matchedProduct && (
+          <>
+            <div className="confirm-head">
+              <span className="confirm-head-icon"><Mic size={16} strokeWidth={2} /></span>
+              <span className="confirm-head-title">Not currently in our catalog</span>
+            </div>
+            <div className="confirm-body">
+              <div className="voice-unmatched-msg">
+                We don't have a match for what you asked for. Send a request and our team will follow up with you on WhatsApp about availability.
+              </div>
+              <div className="confirm-field">
+                <span className="confirm-field-label">What are you looking for?</span>
+                <input
+                  className={"confirm-field-input" + (fieldErrors.product ? " has-error" : "")}
+                  value={parsed.product || ""}
+                  placeholder="Not heard - type it"
+                  onChange={(e) => { updateParsed("product", e.target.value); setFieldErrors((f) => ({ ...f, product: null })); }}
+                />
+                {fieldErrors.product && <span className="vinput-error">{fieldErrors.product}</span>}
+              </div>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn" onClick={onClose}>Cancel</button>
+              <button className="btn primary" onClick={handleConfirm}>Send Request</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------
    MAIN
 --------------------------------------------------------------------- */
@@ -2136,6 +2463,43 @@ export default function MarketScreen() {
   const [watchlist, setWatchlist] = useState(() => new Set());
   const [confirmation, setConfirmation] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const [voiceToast, setVoiceToast] = useState(null);
+
+  // Voice request resolves one of two ways - nothing is ever stored in
+  // this portal (per the brief: ops receives it on their side, buyer
+  // gets a WhatsApp follow-up). Matched product -> straight into Order
+  // Book like a real bid. Unmatched -> just a confirmation toast.
+  const addVoiceMatchToOrderBook = (product, qty, price) => {
+    const variant = product.variants[0];
+    const key = `${product.id}-${variant.storage}-${variant.color}-${Date.now()}`;
+    setTray((prev) => [
+      ...prev,
+      {
+        key,
+        productName: product.name,
+        brand: product.brandName,
+        image: variant.image || null,
+        category: product.category,
+        storage: variant.storage,
+        color: variant.color,
+        qty,
+        price,
+      },
+    ]);
+    if (!isCompact) setTrayOpen(true);
+    setFlashKey(key);
+    window.setTimeout(() => setFlashKey((k) => (k === key ? null : k)), 1300);
+    setVoiceModalOpen(false);
+    setVoiceToast({ title: "Added to Order Book", body: `${product.name} · Qty ${qty} · ${price} AED/unit.` });
+    window.setTimeout(() => setVoiceToast(null), 4200);
+  };
+
+  const sendUnmatchedVoiceRequest = (productText) => {
+    setVoiceModalOpen(false);
+    setVoiceToast({ title: "Request sent", body: `Our team will reach out on WhatsApp about "${productText}".` });
+    window.setTimeout(() => setVoiceToast(null), 4200);
+  };
   const searchRef = useRef(null);
   // Always collapsed by default now (was width-based) - gives Product
   // Detail/Order Book more room from the first paint instead of only
@@ -2309,14 +2673,19 @@ export default function MarketScreen() {
           --text: #EDEEF0;
           --text-muted: #AEB4BE;
           --text-faint: #6B6F78;
-          --amber: #EF5323;
+          /* Shifted from #EF5323 per design review - the old value sat
+             only ~14° of hue from --red, close enough that this audience
+             could plausibly read primary CTAs as a danger/warning color.
+             This value keeps the same "actionable CTA" job but sits
+             further from the error hue (~40° away). */
+          --amber: #E7A63C;
           --blue: #4C86FF;
           --green: #34C77B;
           --gold: #D9A441;
           --red: #E5484D;
           --blue-rgb: 76,134,255;
           --gold-rgb: 217,164,65;
-          --amber-rgb: 239,83,35;
+          --amber-rgb: 231,166,60;
           --green-rgb: 52,199,123;
           --red-rgb: 229,72,77;
         }
@@ -2574,6 +2943,50 @@ export default function MarketScreen() {
           background: var(--canvas);
           margin: 0 -16px;
           padding: 16px 16px 14px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .browse-sticky-search .searchbar { flex: 1; min-width: 0; }
+        .voice-entry-btn {
+          flex-shrink: 0;
+          width: 38px;
+          height: 38px;
+          border-radius: 10px;
+          position: relative;
+          background: linear-gradient(135deg, #7C5CFF, #29D3E0 60%, #FF5CA8);
+          background-size: 200% 200%;
+          border: none;
+          color: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          animation: voiceEntryGradient 5s ease infinite;
+        }
+        .voice-entry-btn::before {
+          content: "";
+          position: absolute;
+          inset: -3px;
+          border-radius: 13px;
+          background: linear-gradient(135deg, #7C5CFF, #29D3E0 60%, #FF5CA8);
+          background-size: 200% 200%;
+          opacity: 0.45;
+          z-index: -1;
+          animation: voiceEntryGradient 5s ease infinite, voiceEntryPulse 2.4s ease-out infinite;
+        }
+        .voice-entry-btn svg { position: relative; z-index: 1; }
+        @keyframes voiceEntryGradient {
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+        @keyframes voiceEntryPulse {
+          0% { transform: scale(1); opacity: 0.45; }
+          70% { transform: scale(1.35); opacity: 0; }
+          100% { transform: scale(1.35); opacity: 0; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .voice-entry-btn, .voice-entry-btn::before { animation: none; }
         }
         .searchbar {
           display: flex;
@@ -2729,10 +3142,12 @@ export default function MarketScreen() {
           background: var(--surface);
           border-color: var(--blue);
         }
+        /* Was 60x60 - competed too hard for attention in a text-dense list
+           where the product name/signals are the actual scan target. */
         .prow-thumb {
-          width: 60px;
-          height: 60px;
-          border-radius: 10px;
+          width: 46px;
+          height: 46px;
+          border-radius: 9px;
           background: linear-gradient(155deg, var(--surface-raised) 0%, var(--surface) 100%);
           border: 1px solid var(--line);
           display: flex;
@@ -2910,11 +3325,16 @@ export default function MarketScreen() {
         /* Was a side-by-side row (image left, specs right) - now stacked:
            the new price-forward header first (the primary read), specs
            below it. Price replaces the image as the thing read first. */
+        /* No left/right padding - this now lives inside .vtable-wrap
+           (moved there for the "only the title stays fixed" scroll fix),
+           which already provides the 26px gutter. Keeping its own 26px
+           on top of that double-inset the price card ~20px deeper than
+           "Place Your Bid"/"Market News", which sit flush at one 26px. */
         .detail-overview {
           display: flex;
           flex-direction: column;
           gap: 18px;
-          padding: 0 26px 24px;
+          padding: 0 0 24px;
           max-width: 1100px;
           border-bottom: 1px solid var(--line-soft);
           flex-shrink: 0;
@@ -2989,22 +3409,51 @@ export default function MarketScreen() {
           box-sizing: border-box;
         }
         .detail-gallery-thumb.is-active { border-color: var(--blue); }
-        /* PRICE-FORWARD HEADER - one bordered card, pure pricing data (no
-           thumbnail - that now lives with the title in .detail-identity). */
-        /* Border only, no fill - enough to read as one grouped unit
-           without adding another filled panel on a page that already has
-           several (Order Book, table). Content's own typography (bold
-           colored prices vs. muted labels) carries the hierarchy now, not
-           the box. */
+        /* PRICE-FORWARD HEADER - one card, title inside (same pattern as
+           Order Book's header), pure pricing data below (no thumbnail -
+           that lives with the title in .detail-identity). Raised surface,
+           not just a border - this is the important read on the page and
+           should outrank secondary sections like Market News. */
+        /* Outline only, no fill - same treatment as Market News, not
+           elevated. That was an unrequested addition; not repeating it. */
+        /* Bleeds via negative margin equal to the title/body's own 20px
+           padding (same technique as .news-section) - now that
+           .detail-overview's redundant padding is fixed, this is the one
+           remaining offset: without it, the title text would sit 20px
+           deeper than "Place Your Bid"/"Market News" (flush at the shared
+           26px gutter). The border moves outward instead so the text
+           lands back at that same flush point. */
+        /* No margin bleed - border stays flush with Place Your Bid's card
+           border (a bled border reads as misaligned with it, worse than
+           the title text sitting slightly deeper than the flush titles). */
         .pd-price-card {
+          display: flex;
+          flex-direction: column;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+        }
+        /* No divider, tightened padding - a border-bottom here just added an
+           extra seam, and the original 16/20px padding read as loose once
+           the title moved inside the card. */
+        .pd-price-card-title {
+          font-size: 13px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: var(--text-muted);
+          padding: 10px 16px 0;
+        }
+        .pd-price-card-body {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
-          gap: 14px 22px;
-          border: 1px solid var(--line);
-          border-radius: 10px;
-          padding: 16px 20px;
+          gap: 10px 22px;
+          padding: 10px 16px 12px;
         }
+        /* Single-variant hero has one short line of content - the same
+           padding as the multi-variant list left it looking sparse/empty,
+           so it gets its own tighter vertical rhythm. */
+        .pd-price-card.is-hero .pd-price-card-body { padding: 8px 16px 12px; }
         /* Equal-weight variant price list - replaces the old single hero
            number now that variants can price differently. Each row carries
            its own color/arrow, since variants can genuinely move
@@ -3013,7 +3462,7 @@ export default function MarketScreen() {
         .pd-price-list {
           display: flex;
           flex-direction: column;
-          gap: 10px;
+          gap: 8px;
           /* A basis (not flex-shrink:0 + min-width) makes the 3-column
              grid actually claim room on wide viewports - a flex item with
              no explicit basis collapses toward its grid's min-content, so
@@ -3033,20 +3482,14 @@ export default function MarketScreen() {
           grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
           gap: 14px 20px;
         }
-        /* Flush section title above the card (see the .pd-price-card JSX
-           comment) - same eyebrow treatment as .spec-label, deliberately
-           plain/uncolored so it doesn't outrank the prices it labels. */
-        .pd-price-section-label {
-          font-size: 13px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          color: var(--text-muted);
-        }
         /* Each variant is a 2-line pair (label, then arrow+price) - tight
            gap within the pair, looser gap between pairs (via .pd-price-list
            above) so it chunks visually instead of reading as a flat list. */
         .pd-price-pair { display: flex; flex-direction: column; gap: 2px; }
-        .pd-price-row-label { font-size: 13px; color: var(--text-muted); }
+        /* Bumped from regular weight/13px - this is the actual scan target
+           when comparing variants, and was reading too quiet next to the
+           bold price beneath it. */
+        .pd-price-row-label { font-size: 13px; font-weight: 600; color: var(--text-muted); }
         .pd-price-row-value {
           font-family: 'JetBrains Mono', monospace;
           font-size: 18px;
@@ -3305,29 +3748,34 @@ export default function MarketScreen() {
            get squeezed into overlapping/illegible columns. Scrolling
            horizontally within its own panel, rather than visually
            breaking, is the standard trading-table pattern for this. */
-        .vtable-wrap { flex: 1; overflow-y: auto; overflow-x: auto; padding: 0 26px 26px; max-width: 1100px; }
+        /* Reference Price, spec sheet, the bid card, and Market News all
+           scroll together in here now - only .detail-head stays fixed
+           above it. */
+        .vtable-wrap { flex: 1; overflow-y: auto; overflow-x: auto; padding: 8px 26px 26px; max-width: 1100px; }
+        /* Raised card, title inside (same pattern as Reference Price/Order
+           Book) - a card is one visual unit with its own heading, not a
+           floating label plus a separate box. */
+        /* Flush title above the card (see .vtable-title JSX) - reverted
+           back to this; moving it inside the card wasn't asked for. Card
+           uses --surface (same shade Market News had), not --surface-raised -
+           the raised value flattened the row divider lines' contrast
+           against it. */
         .vtable-title {
           font-weight: 600;
           font-size: 15px;
-          /* No left/right padding - matches .vtable-header/.vrow (fixed
-             earlier) so the text sits flush with the box edge instead of
-             12px inside it. The box edge was always correctly positioned;
-             it was the padding pushing the visible text inward that I
-             missed by measuring the div's rect instead of the text. */
           padding: 20px 0 12px;
-          position: sticky;
-          left: 0;
+        }
+        .vtable-card {
+          background: var(--surface);
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 0 16px;
         }
         .vtable-header {
           display: grid;
           grid-template-columns: 0.85fr 1.1fr 1fr 0.7fr 0.95fr 78px;
-          min-width: 640px;
+          min-width: 608px;
           gap: 10px;
-          /* No left/right inset beyond .vtable-wrap's own 26px padding -
-             a stray extra 12px here (and on .vrow below) was indenting
-             the table 12px further than .vtable-title and .news-section,
-             so column headers/rows didn't line up with either the "Place
-             Your Bid" title above or "Market News" below. */
           padding: 14px 0 12px;
           border-bottom: 1px solid var(--line);
           font-size: 13px;
@@ -3336,7 +3784,7 @@ export default function MarketScreen() {
           color: var(--text-muted);
           position: sticky;
           top: 0;
-          background: var(--canvas);
+          background: var(--surface);
           align-items: end;
         }
         /* Section title above the table, not a "Your Bid" column-group
@@ -3345,14 +3793,41 @@ export default function MarketScreen() {
         .vrow {
           display: grid;
           grid-template-columns: 0.85fr 1.1fr 1fr 0.7fr 0.95fr 78px;
-          min-width: 640px;
+          min-width: 608px;
           gap: 10px;
           align-items: center;
           padding: 13px 0;
           border-bottom: 1px solid var(--line-soft);
         }
         .vrow:hover { background: rgba(255,255,255,0.015); }
+        /* Not flex-column globally - that leaked into .vrow-color (which
+           needs its swatch beside the label, not stacked above it) since
+           .vrow-color doesn't set its own flex-direction. Qty/price cells
+           get their own column wrapper (.vrow-field-control) instead. */
         .vrow-cell { font-size: 15px; color: var(--text); }
+        .vrow-field-control { display: flex; flex-direction: column; gap: 4px; }
+        .vinput.has-error { border-color: var(--red); background: rgba(var(--red-rgb), 0.08); }
+        .vinput-error {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 12px;
+          color: var(--red);
+        }
+        .vinput-error::before {
+          content: "!";
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 13px;
+          height: 13px;
+          border-radius: 50%;
+          background: var(--red);
+          color: var(--canvas);
+          font-size: 9.5px;
+          font-weight: 800;
+          flex-shrink: 0;
+        }
         .vrow-storage { font-family: 'JetBrains Mono', monospace; }
         .vrow-color {
           font-family: 'Inter', sans-serif;
@@ -3369,9 +3844,12 @@ export default function MarketScreen() {
           flex-shrink: 0;
           border: 1px solid var(--line);
         }
+        /* Raised, not flat --surface - the table card itself now uses
+           --surface as its own background, so a same-colored input only
+           differed by a thin border and was easy to lose against it. */
         .vinput {
           width: 100%;
-          background: var(--surface);
+          background: var(--surface-raised);
           border: 1px solid var(--line);
           border-radius: 6px;
           padding: 9px 10px;
@@ -3408,7 +3886,6 @@ export default function MarketScreen() {
           font-weight: 600;
           transition: all 0.15s;
         }
-        .addbtn:disabled { cursor: not-allowed; }
         .addbtn.is-ready {
           border-color: var(--amber);
           color: var(--amber);
@@ -3433,9 +3910,13 @@ export default function MarketScreen() {
         .news-section-head { margin-bottom: 12px; }
         .news-section-title { font-weight: 600; font-size: 15px; }
         .news-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px; }
+        /* Deliberately flatter than Reference Price/Place Your Bid (which
+           use --surface-raised) - Market News is secondary context, not a
+           pricing/bidding action, so it shouldn't compete at the same
+           visual elevation. Quieter border too (--line-soft, not --line). */
+        /* Outline only, no fill - same treatment as Reference Price. */
         .news-card {
           flex: 0 0 240px;
-          background: var(--surface-raised);
           border: 1px solid var(--line);
           border-radius: 8px;
           padding: 12px;
@@ -3550,6 +4031,145 @@ export default function MarketScreen() {
         .cmdk-item-thumb img { width: 100%; height: 100%; object-fit: contain; }
         .cmdk-item-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .cmdk-item-brand { flex-shrink: 0; font-size: 12px; color: var(--text-muted); }
+
+        /* VOICE REQUEST - same .cmdk-backdrop overlay chrome as the
+           command palette, different panel content. */
+        .voice-modal {
+          width: 420px;
+          max-width: calc(100vw - 40px);
+          background: var(--surface-raised);
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+          overflow: hidden;
+        }
+        .voice-idle { padding: 28px 24px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+        .voice-mic-btn {
+          width: 64px;
+          height: 64px;
+          border-radius: 50%;
+          background: rgba(var(--blue-rgb), 0.12);
+          border: 1px solid rgba(var(--blue-rgb), 0.4);
+          color: var(--blue);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .voice-mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .voice-idle-icon { color: var(--blue); }
+        .voice-idle-title { font-size: 15px; font-weight: 600; }
+        .voice-idle-hint { font-size: 13px; color: var(--text-faint); }
+        .voice-idle-eg { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        .voice-unsupported { font-size: 12px; color: var(--red); }
+        .voice-typed-row { display: flex; gap: 8px; width: 100%; margin-top: 6px; }
+        .voice-typed-input {
+          flex: 1;
+          background: var(--surface);
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 8px 10px;
+          color: var(--text);
+          font-size: 13px;
+        }
+        .voice-typed-btn {
+          flex-shrink: 0;
+          background: var(--amber);
+          color: #241701;
+          border: none;
+          border-radius: 8px;
+          padding: 8px 14px;
+          font-size: 13px;
+          font-weight: 600;
+        }
+        .voice-listening { padding: 26px 24px 22px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+        .voice-ring-wrap { position: relative; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
+        .voice-ring {
+          position: absolute;
+          inset: 0;
+          border-radius: 50%;
+          border: 1.5px solid rgba(var(--blue-rgb), 0.5);
+          animation: voiceRingPulse 1.8s ease-out infinite;
+        }
+        .voice-ring-delay1 { animation-delay: 0.45s; }
+        .voice-ring-delay2 { animation-delay: 0.9s; }
+        @keyframes voiceRingPulse {
+          0% { transform: scale(0.72); opacity: 0.9; }
+          100% { transform: scale(1.55); opacity: 0; }
+        }
+        .voice-mic-core {
+          position: relative;
+          z-index: 2;
+          width: 56px;
+          height: 56px;
+          border-radius: 50%;
+          background: var(--blue);
+          color: #06101f;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 0 24px rgba(var(--blue-rgb), 0.55);
+        }
+        .voice-wave { display: flex; align-items: flex-end; gap: 3px; height: 22px; }
+        .voice-wave span {
+          width: 3px;
+          border-radius: 2px;
+          background: var(--blue);
+          height: 60%;
+          animation: voiceWaveBar 1.1s ease-in-out infinite;
+        }
+        @keyframes voiceWaveBar {
+          0%, 100% { transform: scaleY(0.4); opacity: 0.7; }
+          50% { transform: scaleY(1); opacity: 1; }
+        }
+        .voice-transcript { font-size: 15px; line-height: 1.5; text-align: center; min-height: 44px; }
+        .voice-final { color: var(--text); }
+        .voice-interim { color: var(--text-faint); }
+        .voice-status { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
+        .voice-stop-btn {
+          background: transparent;
+          border: 1px solid var(--line);
+          color: var(--text-muted);
+          border-radius: 8px;
+          padding: 7px 16px;
+          font-size: 13px;
+          font-weight: 600;
+        }
+        .confirm-head {
+          padding: 16px 20px;
+          border-bottom: 1px solid var(--line);
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .confirm-head-icon { color: var(--blue); flex-shrink: 0; display: flex; }
+        .confirm-head-title { font-size: 14px; font-weight: 600; }
+        .confirm-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+        .confirm-field { display: flex; flex-direction: column; gap: 6px; }
+        .confirm-field-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+        .confirm-field-static { font-size: 15px; font-weight: 600; padding: 9px 0; }
+        .voice-unmatched-msg { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+        .confirm-field-input {
+          background: var(--surface);
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 9px 12px;
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 14px;
+          color: var(--text);
+        }
+        .confirm-field-input.has-error { border-color: var(--red); background: rgba(var(--red-rgb), 0.08); }
+        .confirm-footer { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 10px; justify-content: flex-end; }
+        .btn {
+          font-size: 13.5px;
+          font-weight: 600;
+          padding: 9px 18px;
+          border-radius: 8px;
+          border: 1px solid var(--line);
+          background: transparent;
+          color: var(--text-muted);
+        }
+        .btn.primary { background: var(--amber); border-color: var(--amber); color: #241701; }
+
 
         /* TRAY */
         .tray-summary { display: flex; align-items: center; gap: 10px; }
@@ -3712,6 +4332,9 @@ export default function MarketScreen() {
           padding: 14px 16px;
           background: var(--canvas);
           overflow: hidden;
+          display: flex;
+          align-items: center;
+          gap: 8px;
           transition: height 0.2s ease, padding 0.2s ease, opacity 0.2s ease;
         }
         /* .searchbar carries its own margin-bottom for the desktop context
@@ -3719,7 +4342,7 @@ export default function MarketScreen() {
            that stacked with the wrapper's own padding, nearly doubling the
            bottom gap versus the top. Neutralized so the wrapper is the only
            source of spacing here. */
-        .mobile-search-bar .searchbar { margin-bottom: 0; }
+        .mobile-search-bar .searchbar { margin-bottom: 0; flex: 1; min-width: 0; }
         .mobile-plp { flex: 1; min-height: 0; display: flex; overflow: hidden; }
         /* Bottom padding is set inline from the measured .mobile-footer
            height (via useElementHeight) instead of a guessed constant, so
@@ -4222,6 +4845,7 @@ export default function MarketScreen() {
         }
         .vcard-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .vcard-field-label { font-size: 13px; color: var(--text-muted); }
+        .vcard-field-control { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
         .vcard-field .vinput { width: 130px; text-align: right; }
         .vcard-addbtn { width: 100%; justify-content: center; padding: 11px; margin-top: 2px; }
 
@@ -4317,6 +4941,21 @@ export default function MarketScreen() {
       `}</style>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={jumpToProduct} />
+      <VoiceRequestModal
+        open={voiceModalOpen}
+        onClose={() => setVoiceModalOpen(false)}
+        onMatchedConfirm={addVoiceMatchToOrderBook}
+        onUnmatchedSend={sendUnmatchedVoiceRequest}
+      />
+      {voiceToast && (
+        <div className="confirm-toast">
+          <div className="confirm-icon"><Check size={13} strokeWidth={2.5} /></div>
+          <div>
+            <div className="confirm-title">{voiceToast.title}</div>
+            <div className="confirm-body">{voiceToast.body}</div>
+          </div>
+        </div>
+      )}
 
       {!isCompact && <Ticker />}
 
@@ -4349,6 +4988,9 @@ export default function MarketScreen() {
                     />
                     <span className="searchbar-kbd">/</span>
                   </div>
+                  <button className="voice-entry-btn" onClick={() => setVoiceModalOpen(true)} title="Request a product by voice">
+                    <Mic size={16} strokeWidth={1.9} />
+                  </button>
                 </div>
                 <CategoryTabs categories={visibleCategories} selected={selectedCategory} onSelect={handleSelectCategory} />
                 {availableBrands.length > 0 && (
@@ -4417,34 +5059,37 @@ export default function MarketScreen() {
                         </div>
                       </div>
 
-                      <div className="detail-overview">
-                        <ProductPriceHeader product={selectedProduct} />
-                        <SpecSheet product={selectedProduct} />
-                      </div>
-
+                      {/* Only .detail-head (thumbnail/title/identity) stays
+                          fixed above this - Reference Price, spec sheet, the
+                          bid table, and Market News all scroll together as
+                          one region now. */}
                       <div className="vtable-wrap">
-                        {/* Section title, not a "Your Bid" column-group label - the
-                            whole table is bidding UI now that reference price moved
-                            into the price card above, so one title covers it all. */}
-                        <div className="vtable-title">Place Your Bid</div>
-                        <div className="vtable-header" style={{ gridTemplateColumns: gridTemplate }}>
-                          {hasStorage && <div>Storage</div>}
-                          {hasColor && <div>Color</div>}
-                          <div className="vrow-bid-start">Bid Qty</div>
-                          <div>Target Price</div>
-                          <div></div>
+                        <div className="detail-overview">
+                          <ProductPriceHeader product={selectedProduct} />
+                          <SpecSheet product={selectedProduct} />
                         </div>
-                        {selectedProduct.variants.map((v, i) => (
-                          <VariantRow
-                            key={i}
-                            variant={v}
-                            onAdd={addToTray}
-                            showStorage={hasStorage}
-                            showColor={hasColor}
-                            gridTemplate={gridTemplate}
-                            isLast={i === selectedProduct.variants.length - 1}
-                          />
-                        ))}
+
+                        <div className="vtable-title">Place Your Bid</div>
+                        <div className="vtable-card">
+                          <div className="vtable-header" style={{ gridTemplateColumns: gridTemplate }}>
+                            {hasStorage && <div>Storage</div>}
+                            {hasColor && <div>Color</div>}
+                            <div className="vrow-bid-start">Bid Qty</div>
+                            <div>Target Price</div>
+                            <div></div>
+                          </div>
+                          {selectedProduct.variants.map((v, i) => (
+                            <VariantRow
+                              key={i}
+                              variant={v}
+                              onAdd={addToTray}
+                              showStorage={hasStorage}
+                              showColor={hasColor}
+                              gridTemplate={gridTemplate}
+                              isLast={i === selectedProduct.variants.length - 1}
+                            />
+                          ))}
+                        </div>
                         <MarketNewsSection product={selectedProduct} />
                       </div>
                     </>
@@ -4498,6 +5143,9 @@ export default function MarketScreen() {
                   spellCheck="false"
                 />
               </div>
+              <button className="voice-entry-btn" onClick={() => setVoiceModalOpen(true)} title="Request a product by voice">
+                <Mic size={16} strokeWidth={1.9} />
+              </button>
             </div>
           )}
 
