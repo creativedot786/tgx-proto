@@ -26,6 +26,8 @@ import {
   TrendingUp,
   TrendingDown,
   Mic,
+  ShoppingBag,
+  AlertTriangle,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------
@@ -2224,32 +2226,99 @@ function parseVoiceRequest(text) {
     productText = cleaned || null;
   }
 
-  return { product: productText, matchedProduct, qty, price, currency };
+  // A matched product may have several storage/color variants - if the
+  // sentence named one, prefill that row; otherwise default to the first.
+  // Every variant still gets its own row (same convention as the real
+  // Place Your Bid table), so nothing is silently assumed.
+  let variants = null;
+  if (matchedProduct) {
+    let variantIndex = 0;
+    const found = matchedProduct.variants.findIndex((v) => {
+      const storageHit = v.storage && t.includes(String(v.storage).toLowerCase());
+      const colorHit = v.color && t.includes(String(v.color).toLowerCase());
+      return storageHit || colorHit;
+    });
+    if (found >= 0) variantIndex = found;
+    variants = matchedProduct.variants.map((v, i) => ({
+      qty: i === variantIndex ? qty : null,
+      price: i === variantIndex ? price : null,
+    }));
+  }
+
+  return { product: productText, matchedProduct, qty, price, currency, variants };
 }
 
-// Idle -> listening -> confirm, all in one overlay (reuses the Cmd+K
-// palette's centered-modal chrome). Real Web Speech API transcription
-// where supported, typed fallback everywhere else - both feed the same
-// parser, so nothing here is a canned/staged demo.
-function VoiceRequestModal({ open, onClose, onMatchedConfirm, onUnmatchedSend }) {
-  // No idle "tap to start" step - opening the modal starts listening
-  // immediately (or, unsupported browsers, goes straight to the typed
-  // fallback) so there's no extra click before the thing the user
-  // actually opened this for.
-  const [phase, setPhase] = useState("listening");
+// Sleek always-on comet trace around the mic entry button - a smooth
+// violet->rose gradient segment (plus two dimmer, phase-delayed echoes
+// for a fading tail) continuously traces the button's real rounded-rect
+// perimeter. Real units, not the unreliable SVG pathLength normalization.
+function VoiceTraceIcon() {
+  return (
+    <svg className="voice-trace" viewBox="0 0 40 40">
+      <defs>
+        <linearGradient id="micTraceGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="40" y2="40">
+          <stop offset="0%" stopColor="#6E5BFF" />
+          <stop offset="100%" stopColor="#E8547A" />
+        </linearGradient>
+      </defs>
+      <rect className="trace-echo" x="1" y="1" width="38" height="38" rx="9" ry="9" fill="none" stroke="#E8547A" strokeOpacity="0.12" strokeWidth="1.25" strokeLinecap="round" strokeDasharray="20 116.18" style={{ animationDelay: ".28s" }} />
+      <rect className="trace-echo" x="1" y="1" width="38" height="38" rx="9" ry="9" fill="none" stroke="#6E5BFF" strokeOpacity="0.22" strokeWidth="1.25" strokeLinecap="round" strokeDasharray="20 116.18" style={{ animationDelay: ".14s" }} />
+      <rect className="trace-main" x="1" y="1" width="38" height="38" rx="9" ry="9" fill="none" stroke="url(#micTraceGrad)" strokeWidth="1.25" strokeLinecap="round" strokeDasharray="20 116.18" />
+    </svg>
+  );
+}
+
+// One recording can name several products - split on "and"/commas and
+// parse each clause independently so a dead-end item never blocks the
+// rest.
+function parseVoiceItems(text) {
+  const segments = text.split(/,|\band\b/i).map((s) => s.trim()).filter(Boolean);
+  return (segments.length ? segments : [text]).map(parseVoiceRequest);
+}
+
+// Standalone from the product search bar entirely (that stays wired to
+// the real search API, untouched). Opening the modal starts listening
+// immediately - no idle tap-to-start step - and tapping the same mic
+// control again is the only stop trigger. Real Web Speech API where
+// supported, typed fallback everywhere else - both feed the same parser.
+function VoiceRequestModal({ open, onClose, onConfirm, isCompact }) {
+  const [phase, setPhase] = useState("recording");
   const [finalTranscript, setFinalTranscript] = useState("");
   const [interimTranscript, setInterimTranscript] = useState("");
   const [typedText, setTypedText] = useState("");
-  const [parsed, setParsed] = useState(null);
-  const [fieldErrors, setFieldErrors] = useState({});
+  const [items, setItems] = useState([]);
+  const [itemErrors, setItemErrors] = useState({});
+  const [elapsed, setElapsed] = useState(0);
+  const [typedReason, setTypedReason] = useState("unsupported");
   const recognitionRef = useRef(null);
+  const timerRef = useRef(null);
 
   const SpeechRecognitionCtor = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
 
-  const startListening = () => {
+  const finishRecording = (text) => {
+    window.clearInterval(timerRef.current);
+    if (text.trim()) {
+      setItems(parseVoiceItems(text.trim()));
+      setItemErrors({});
+      setPhase("review");
+    } else {
+      setTypedReason("timeout");
+      setPhase("typed");
+    }
+  };
+
+  const startRecording = () => {
     setFinalTranscript("");
     setInterimTranscript("");
-    setPhase("listening");
+    setElapsed(0);
+    setPhase("recording");
+    window.clearInterval(timerRef.current);
+    timerRef.current = window.setInterval(() => setElapsed((s) => s + 1), 1000);
+    if (!SpeechRecognitionCtor) {
+      setTypedReason("unsupported");
+      setPhase("typed");
+      return;
+    }
     const recognition = new SpeechRecognitionCtor();
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -2265,12 +2334,7 @@ function VoiceRequestModal({ open, onClose, onMatchedConfirm, onUnmatchedSend })
     };
     recognition.onend = () => {
       setFinalTranscript((current) => {
-        if (current.trim()) {
-          setPhase("confirm");
-          setParsed(parseVoiceRequest(current));
-        } else {
-          setPhase("typed");
-        }
+        finishRecording(current);
         return current;
       });
     };
@@ -2281,57 +2345,93 @@ function VoiceRequestModal({ open, onClose, onMatchedConfirm, onUnmatchedSend })
   useEffect(() => {
     if (open) {
       setTypedText("");
-      setParsed(null);
-      setFieldErrors({});
-      if (SpeechRecognitionCtor) startListening();
-      else setPhase("typed");
+      setItems([]);
+      setItemErrors({});
+      startRecording();
     } else {
       if (recognitionRef.current) recognitionRef.current.stop();
+      window.clearInterval(timerRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const stopListening = () => recognitionRef.current?.stop();
+  const stopRecording = () => recognitionRef.current?.stop();
 
   const handleTypedParse = () => {
     if (!typedText.trim()) return;
-    setPhase("confirm");
-    setParsed(parseVoiceRequest(typedText.trim()));
+    finishRecording(typedText.trim());
   };
 
-  const updateParsed = (key, value) => setParsed((p) => ({ ...p, [key]: value }));
+  const updateItem = (idx, key, value) =>
+    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [key]: value } : it)));
+
+  const updateVariant = (idx, vIdx, key, value) =>
+    setItems((prev) =>
+      prev.map((it, i) =>
+        i === idx ? { ...it, variants: it.variants.map((v, j) => (j === vIdx ? { ...v, [key]: value } : v)) } : it
+      )
+    );
 
   const handleConfirm = () => {
-    if (parsed.matchedProduct) {
-      const errors = {};
-      if (!parsed.qty) errors.qty = "Enter a quantity";
-      if (!parsed.price) errors.price = "Enter a unit price";
-      if (Object.keys(errors).length) {
-        setFieldErrors(errors);
-        return;
+    const errors = {};
+    items.forEach((it, idx) => {
+      if (it.matchedProduct) {
+        // At least one variant row needs both fields filled - which
+        // variant doesn't matter, unlike the RFQ side there's no single
+        // "the" qty/price to require.
+        const filled = it.variants.some((v) => v.qty && v.price);
+        if (!filled) errors[idx] = { variants: "Fill in a quantity and price for at least one" };
+      } else if (!it.product) {
+        errors[idx] = { product: "Enter what you're looking for" };
       }
-      onMatchedConfirm(parsed.matchedProduct, parsed.qty, parsed.price);
-    } else {
-      if (!parsed.product) {
-        setFieldErrors({ product: "Enter what you're looking for" });
-        return;
-      }
-      onUnmatchedSend(parsed.product);
+    });
+    if (Object.keys(errors).length) {
+      setItemErrors(errors);
+      return;
     }
+    onConfirm(items);
   };
+
+  const timeLabel = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
 
   if (!open) return null;
 
-  return (
-    <div className="cmdk-backdrop" onClick={onClose}>
-      <div className="voice-modal" onClick={(e) => e.stopPropagation()}>
+  const typedActions = (
+    <>
+      {typedReason === "timeout" && SpeechRecognitionCtor && (
+        <button className="btn" onClick={startRecording}>Try Voice Again</button>
+      )}
+      <button className="btn primary" onClick={handleTypedParse}>Continue</button>
+    </>
+  );
+
+  const reviewActions = (
+    <>
+      <button className="btn" onClick={startRecording}>Try Voice Again</button>
+      <button className="btn primary" onClick={handleConfirm}>Confirm {items.length} Item{items.length === 1 ? "" : "s"}</button>
+    </>
+  );
+
+  const phaseTitle =
+    phase === "typed" ? (typedReason === "unsupported" ? "Voice isn't available here" : "Didn't catch that")
+    : phase === "review" ? "Review your request"
+    : null;
+
+  const bodyContent = (
+    <>
         {phase === "typed" && (
           <div className="voice-idle">
             <div className="voice-idle-icon"><Mic size={22} strokeWidth={1.8} /></div>
-            <div className="voice-idle-title">Request a product</div>
-            {!SpeechRecognitionCtor && <div className="voice-unsupported">Voice isn't supported in this browser - type it instead.</div>}
+            {!isCompact && (
+              <div className="voice-idle-title">
+                {typedReason === "unsupported" ? "Voice isn't available here" : "Didn't catch that"}
+              </div>
+            )}
             <div className="voice-idle-hint">
-              Try: <span className="voice-idle-eg">"10 units of Galaxy S24 at 900 AED"</span>
+              {typedReason === "unsupported" ? "Type your request below instead." : "No worries — type it below."}
+            </div>
+            <div className="voice-example">
+              Mention the product (with size or color if it has options), how many you need, and your target price for the best results.
             </div>
             <div className="voice-typed-row">
               <input
@@ -2342,104 +2442,165 @@ function VoiceRequestModal({ open, onClose, onMatchedConfirm, onUnmatchedSend })
                 onKeyDown={(e) => e.key === "Enter" && handleTypedParse()}
                 autoFocus
               />
-              <button className="voice-typed-btn" onClick={handleTypedParse}>Parse</button>
             </div>
+            {!isCompact && <div className="voice-typed-actions">{typedActions}</div>}
           </div>
         )}
 
-        {phase === "listening" && (
-          <div className="voice-listening">
-            <div className="voice-ring-wrap">
-              <span className="voice-ring" />
-              <span className="voice-ring voice-ring-delay1" />
-              <span className="voice-ring voice-ring-delay2" />
-              <div className="voice-mic-core">
-                <Mic size={20} strokeWidth={2} />
-              </div>
+        {phase === "recording" && (
+          <div className="rec-console">
+            <div className="rec-ring-wrap">
+              <span className="rec-ring" />
+              <span className="rec-ring d2" />
+              <span className="rec-ring d3" />
+              <button className="rec-btn" onClick={stopRecording} title="Stop recording">
+                <span className="rec-stop-sq" />
+              </button>
             </div>
-            <div className="voice-wave">
-              {Array.from({ length: 7 }).map((_, i) => <span key={i} style={{ animationDelay: `${i * 0.12}s` }} />)}
+            <div className="rec-timer"><span className="rec-timer-dot" />{timeLabel}</div>
+            <div className="rec-wave">
+              {Array.from({ length: 9 }).map((_, i) => <span key={i} style={{ animationDelay: `${i * 0.09}s` }} />)}
             </div>
-            <div className="voice-transcript">
-              <span className="voice-final">{finalTranscript}</span>{" "}
+            <div className="rec-transcript">
+              <span className="seg-done">{finalTranscript}</span>{" "}
               <span className="voice-interim">{interimTranscript}</span>
               {!finalTranscript && !interimTranscript && <span className="voice-interim">Say what you'd like to request…</span>}
             </div>
-            <div className="voice-status">LISTENING · TAP TO STOP</div>
-            <button className="voice-stop-btn" onClick={stopListening}>Stop</button>
+            <div className="rec-hint">Say as many products as you need in one go - <b>tap to finish</b>.</div>
           </div>
         )}
 
-        {phase === "confirm" && parsed && parsed.matchedProduct && (
-          <>
-            <div className="confirm-head">
-              <span className="confirm-head-icon"><Mic size={16} strokeWidth={2} /></span>
-              <span className="confirm-head-title">In stock - confirm your bid</span>
-            </div>
-            <div className="confirm-body">
-              <div className="confirm-field">
-                <span className="confirm-field-label">Product</span>
-                <div className="confirm-field-static">{parsed.matchedProduct.name}</div>
-              </div>
-              <div className="confirm-field">
-                <span className="confirm-field-label">Quantity</span>
-                <input
-                  className={"confirm-field-input" + (fieldErrors.qty ? " has-error" : "")}
-                  type="number"
-                  min="0"
-                  value={parsed.qty ?? ""}
-                  placeholder="Not heard - type it"
-                  onChange={(e) => { updateParsed("qty", e.target.value ? Number(e.target.value) : null); setFieldErrors((f) => ({ ...f, qty: null })); }}
-                />
-                {fieldErrors.qty && <span className="vinput-error">{fieldErrors.qty}</span>}
-              </div>
-              <div className="confirm-field">
-                <span className="confirm-field-label">Unit Price ({parsed.currency})</span>
-                <input
-                  className={"confirm-field-input" + (fieldErrors.price ? " has-error" : "")}
-                  type="number"
-                  min="0"
-                  value={parsed.price ?? ""}
-                  placeholder="Not heard - type it"
-                  onChange={(e) => { updateParsed("price", e.target.value ? Number(e.target.value) : null); setFieldErrors((f) => ({ ...f, price: null })); }}
-                />
-                {fieldErrors.price && <span className="vinput-error">{fieldErrors.price}</span>}
-              </div>
-            </div>
-            <div className="confirm-footer">
-              <button className="btn" onClick={onClose}>Cancel</button>
-              <button className="btn primary" onClick={handleConfirm}>Add to Order Book</button>
-            </div>
-          </>
-        )}
+        {phase === "review" && (() => {
+          const matchedIdx = items.map((it, i) => (it.matchedProduct ? i : null)).filter((i) => i !== null);
+          const unmatchedIdx = items.map((it, i) => (!it.matchedProduct ? i : null)).filter((i) => i !== null);
+          return (
+            <div className="review-phase">
+              {!isCompact && <div className="review-title">Review your request</div>}
+              <div className="review-sub">Check the details below, then confirm.</div>
 
-        {phase === "confirm" && parsed && !parsed.matchedProduct && (
-          <>
-            <div className="confirm-head">
-              <span className="confirm-head-icon"><Mic size={16} strokeWidth={2} /></span>
-              <span className="confirm-head-title">Not currently in our catalog</span>
+              {matchedIdx.length > 0 && (
+                <div className="group">
+                  <div className="group-head">
+                    <div className="group-icon bid"><ShoppingBag size={16} strokeWidth={2.2} /></div>
+                    <div className="group-title">In stock — ready to bid</div>
+                  </div>
+                  {matchedIdx.map((idx) => {
+                    const it = items[idx];
+                    const rowErrors = itemErrors[idx] || {};
+                    return (
+                      <div className="item-row bid" key={idx}>
+                        <div className="item-top">
+                          <div className="item-name">{it.matchedProduct.name}</div>
+                          <div className="item-status bid">This is in stock — you're placing a bid on it.</div>
+                        </div>
+                        <div className="variant-table">
+                          <div className="variant-head">
+                            <span>Storage</span><span>Color</span><span>Bid Qty</span><span>Target Price</span>
+                          </div>
+                          {it.matchedProduct.variants.map((v, vIdx) => (
+                            <div className="variant-row" key={vIdx}>
+                              <span className="variant-cell">{v.storage}</span>
+                              <span className="variant-cell">{v.color}</span>
+                              <input
+                                className={"item-input variant-input" + (rowErrors.variants ? " has-error" : "")}
+                                type="number" min="0" placeholder="0"
+                                value={it.variants[vIdx].qty ?? ""}
+                                onChange={(e) => updateVariant(idx, vIdx, "qty", e.target.value ? Number(e.target.value) : null)}
+                              />
+                              <div className="item-input-wrap">
+                                <span className="item-currency">$</span>
+                                <input
+                                  className={"item-input variant-input with-currency" + (rowErrors.variants ? " has-error" : "")}
+                                  type="number" min="0" placeholder="0.00"
+                                  value={it.variants[vIdx].price ?? ""}
+                                  onChange={(e) => updateVariant(idx, vIdx, "price", e.target.value ? Number(e.target.value) : null)}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {rowErrors.variants && <span className="vinput-error">{rowErrors.variants}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {unmatchedIdx.length > 0 && (
+                <div className="group">
+                  <div className="group-head">
+                    <div className="group-icon rfq"><AlertTriangle size={16} strokeWidth={2.2} /></div>
+                    <div className="group-title">Not available — we'll source these</div>
+                  </div>
+                  {unmatchedIdx.map((idx) => {
+                    const it = items[idx];
+                    const rowErrors = itemErrors[idx] || {};
+                    return (
+                      <div className="item-row rfq" key={idx}>
+                        <div className="item-top">
+                          <input
+                            className={"item-name-input" + (rowErrors.product ? " has-error" : "")}
+                            value={it.product || ""}
+                            placeholder="Not heard - type it"
+                            onChange={(e) => updateItem(idx, "product", e.target.value)}
+                          />
+                          {rowErrors.product && <span className="vinput-error">{rowErrors.product}</span>}
+                        </div>
+                        <div className="item-fields">
+                          <div>
+                            <span className="item-field-label">Bid Qty</span>
+                            <input className="item-input" type="number" min="0" placeholder="0" value={it.qty ?? ""}
+                              onChange={(e) => updateItem(idx, "qty", e.target.value ? Number(e.target.value) : null)} />
+                          </div>
+                          <div>
+                            <span className="item-field-label">Target Price</span>
+                            <div className="item-input-wrap">
+                              <span className="item-currency">$</span>
+                              <input className="item-input with-currency" type="number" min="0" placeholder="0.00" value={it.price ?? ""}
+                                onChange={(e) => updateItem(idx, "price", e.target.value ? Number(e.target.value) : null)} />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!isCompact && <div className="review-footer">{reviewActions}</div>}
             </div>
-            <div className="confirm-body">
-              <div className="voice-unmatched-msg">
-                We don't have a match for what you asked for. Send a request and our team will follow up with you on WhatsApp about availability.
-              </div>
-              <div className="confirm-field">
-                <span className="confirm-field-label">What are you looking for?</span>
-                <input
-                  className={"confirm-field-input" + (fieldErrors.product ? " has-error" : "")}
-                  value={parsed.product || ""}
-                  placeholder="Not heard - type it"
-                  onChange={(e) => { updateParsed("product", e.target.value); setFieldErrors((f) => ({ ...f, product: null })); }}
-                />
-                {fieldErrors.product && <span className="vinput-error">{fieldErrors.product}</span>}
-              </div>
-            </div>
-            <div className="confirm-footer">
-              <button className="btn" onClick={onClose}>Cancel</button>
-              <button className="btn primary" onClick={handleConfirm}>Send Request</button>
-            </div>
-          </>
-        )}
+          );
+        })()}
+    </>
+  );
+
+  if (isCompact) {
+    const footerActions = phase === "review" ? reviewActions : phase === "typed" ? typedActions : null;
+    return (
+      <div className="mobile-sheet-backdrop" onClick={onClose}>
+        <div className="mobile-tray-sheet" onClick={(e) => e.stopPropagation()}>
+          <div className="mobile-sheet-handle" />
+          <div className="tray-panel-head">
+            <span className="tray-panel-title">{phaseTitle}</span>
+            <button className="tray-panel-close" onClick={onClose} title="Close">
+              <X size={18} strokeWidth={2} />
+            </button>
+          </div>
+          <div className="mobile-tray-list">{bodyContent}</div>
+          {footerActions && <div className="mobile-tray-footer">{footerActions}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="voice-backdrop" onClick={onClose}>
+      <div className="voice-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="voice-modal-glow" />
+        <button className="voice-modal-close" onClick={onClose} title="Close">
+          <X size={18} strokeWidth={2} />
+        </button>
+        {bodyContent}
       </div>
     </div>
   );
@@ -2466,38 +2627,56 @@ export default function MarketScreen() {
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [voiceToast, setVoiceToast] = useState(null);
 
-  // Voice request resolves one of two ways - nothing is ever stored in
-  // this portal (per the brief: ops receives it on their side, buyer
-  // gets a WhatsApp follow-up). Matched product -> straight into Order
-  // Book like a real bid. Unmatched -> just a confirmation toast.
-  const addVoiceMatchToOrderBook = (product, qty, price) => {
-    const variant = product.variants[0];
-    const key = `${product.id}-${variant.storage}-${variant.color}-${Date.now()}`;
-    setTray((prev) => [
-      ...prev,
-      {
-        key,
-        productName: product.name,
-        brand: product.brandName,
-        image: variant.image || null,
-        category: product.category,
-        storage: variant.storage,
-        color: variant.color,
-        qty,
-        price,
-      },
-    ]);
-    if (!isCompact) setTrayOpen(true);
-    setFlashKey(key);
-    window.setTimeout(() => setFlashKey((k) => (k === key ? null : k)), 1300);
+  // One recording can carry several products - each resolves independently.
+  // Matched items go straight into Order Book like real bids; unmatched
+  // items fan out as individual RFQs. Nothing is ever stored in this
+  // portal (ops receives it on their side, buyer gets a WhatsApp follow-up).
+  const confirmVoiceItems = (voiceItems) => {
+    let addedCount = 0;
+    let rfqCount = 0;
+    let firstAdded = null;
+    voiceItems.forEach((it) => {
+      if (it.matchedProduct) {
+        const product = it.matchedProduct;
+        // Every filled-in variant row becomes its own bid - a product with
+        // multiple sizes/colors can produce more than one Order Book entry.
+        it.variants.forEach((rowVals, vIdx) => {
+          if (!rowVals.qty || !rowVals.price) return;
+          const variant = product.variants[vIdx];
+          const key = `${product.id}-${variant.storage}-${variant.color}-${Date.now()}-${addedCount}`;
+          setTray((prev) => [
+            ...prev,
+            {
+              key,
+              productName: product.name,
+              brand: product.brandName,
+              image: variant.image || null,
+              category: product.category,
+              storage: variant.storage,
+              color: variant.color,
+              qty: rowVals.qty,
+              price: rowVals.price,
+            },
+          ]);
+          setFlashKey(key);
+          window.setTimeout(() => setFlashKey((k) => (k === key ? null : k)), 1300);
+          if (!firstAdded) firstAdded = product.name;
+          addedCount += 1;
+        });
+      } else {
+        rfqCount += 1;
+      }
+    });
+    if (addedCount && !isCompact) setTrayOpen(true);
     setVoiceModalOpen(false);
-    setVoiceToast({ title: "Added to Order Book", body: `${product.name} · Qty ${qty} · ${price} AED/unit.` });
-    window.setTimeout(() => setVoiceToast(null), 4200);
-  };
 
-  const sendUnmatchedVoiceRequest = (productText) => {
-    setVoiceModalOpen(false);
-    setVoiceToast({ title: "Request sent", body: `Our team will reach out on WhatsApp about "${productText}".` });
+    const parts = [];
+    if (addedCount) parts.push(`${addedCount} bid${addedCount === 1 ? "" : "s"} added`);
+    if (rfqCount) parts.push(`${rfqCount} RFQ${rfqCount === 1 ? "" : "s"} sent`);
+    const bodyBits = [];
+    if (addedCount) bodyBits.push(addedCount === 1 ? `${firstAdded} is in your Order Book.` : `${addedCount} products are in your Order Book.`);
+    if (rfqCount) bodyBits.push("Our team will follow up on WhatsApp about the rest.");
+    setVoiceToast({ title: parts.join(", "), body: bodyBits.join(" ") });
     window.setTimeout(() => setVoiceToast(null), 4200);
   };
   const searchRef = useRef(null);
@@ -2688,6 +2867,11 @@ export default function MarketScreen() {
           --amber-rgb: 231,166,60;
           --green-rgb: 52,199,123;
           --red-rgb: 229,72,77;
+          /* Voice-request feature only - deliberately outside the core
+             design system (see color-one-job-rule) so this one AI-driven
+             control reads as distinct. */
+          --ai: #6E5BFF;
+          --ai-rgb: 110,91,255;
         }
 
         * { box-sizing: border-box; }
@@ -2947,46 +3131,50 @@ export default function MarketScreen() {
           align-items: center;
           gap: 8px;
         }
-        .browse-sticky-search .searchbar { flex: 1; min-width: 0; }
+        .browse-sticky-search .searchbar { flex: 1; min-width: 0; margin-bottom: 0; }
         .voice-entry-btn {
           flex-shrink: 0;
           width: 38px;
           height: 38px;
           border-radius: 10px;
           position: relative;
-          background: linear-gradient(135deg, #7C5CFF, #29D3E0 60%, #FF5CA8);
-          background-size: 200% 200%;
+          background: var(--surface-raised);
           border: none;
-          color: #fff;
+          color: var(--ai);
           display: flex;
           align-items: center;
           justify-content: center;
-          animation: voiceEntryGradient 5s ease infinite;
         }
-        .voice-entry-btn::before {
-          content: "";
-          position: absolute;
-          inset: -3px;
-          border-radius: 13px;
-          background: linear-gradient(135deg, #7C5CFF, #29D3E0 60%, #FF5CA8);
-          background-size: 200% 200%;
-          opacity: 0.45;
-          z-index: -1;
-          animation: voiceEntryGradient 5s ease infinite, voiceEntryPulse 2.4s ease-out infinite;
+        .voice-entry-btn svg.voice-trace { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+        .voice-entry-btn svg:not(.voice-trace) {
+          position: relative; z-index: 1;
+          transition: transform 0.3s cubic-bezier(.34, 1.56, .64, 1);
         }
-        .voice-entry-btn svg { position: relative; z-index: 1; }
-        @keyframes voiceEntryGradient {
-          0% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+        .voice-entry-btn:hover svg:not(.voice-trace) { transform: scale(1.18); }
+
+        /* Rest: comet head + two dim trailing echoes loop continuously.
+           Hover: the loop pauses in place, the two echoes fade out, and
+           the main segment's dasharray morphs from a short arc to full
+           perimeter coverage - the tail catching up to close into one
+           static ring. Hover-out reverses both steps. */
+        .trace-echo { transition: opacity 0.35s ease; }
+        .voice-entry-btn:hover .trace-echo { opacity: 0; }
+        .trace-main, .trace-echo { animation: traceDraw 5s linear infinite; }
+        .voice-entry-btn:hover .trace-main,
+        .voice-entry-btn:hover .trace-echo {
+          animation-play-state: paused;
         }
-        @keyframes voiceEntryPulse {
-          0% { transform: scale(1); opacity: 0.45; }
-          70% { transform: scale(1.35); opacity: 0; }
-          100% { transform: scale(1.35); opacity: 0; }
+        .trace-main {
+          transition: stroke-dasharray 0.45s cubic-bezier(.3,.7,.2,1);
         }
+        .voice-entry-btn:hover .trace-main {
+          stroke-dasharray: 136.18 0;
+          transition: stroke-dasharray 0.55s cubic-bezier(.3,.7,.2,1);
+        }
+        @keyframes traceDraw { to { stroke-dashoffset: -136.18; } }
         @media (prefers-reduced-motion: reduce) {
-          .voice-entry-btn, .voice-entry-btn::before { animation: none; }
+          .trace-main, .trace-echo { animation: none; }
+          .voice-entry-btn:hover svg:not(.voice-trace) { transform: none; }
         }
         .searchbar {
           display: flex;
@@ -2999,6 +3187,7 @@ export default function MarketScreen() {
           margin-bottom: 14px;
           transition: border-color 0.15s, box-shadow 0.15s;
         }
+        .searchbar:hover { border-color: var(--text-faint); }
         .searchbar:focus-within {
           border-color: var(--blue);
           box-shadow: 0 0 0 3px rgba(76, 134, 255, 0.15);
@@ -4032,133 +4221,134 @@ export default function MarketScreen() {
         .cmdk-item-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .cmdk-item-brand { flex-shrink: 0; font-size: 12px; color: var(--text-muted); }
 
-        /* VOICE REQUEST - same .cmdk-backdrop overlay chrome as the
-           command palette, different panel content. */
+        /* VOICE REQUEST - standalone from the search bar/API entirely.
+           Premium overlay treatment (frosted blur, glow edge) distinct
+           from the plainer Cmd+K palette chrome. */
+        .voice-backdrop {
+          position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+          background: rgba(6,7,9,0.55);
+          backdrop-filter: blur(14px) saturate(120%);
+          -webkit-backdrop-filter: blur(14px) saturate(120%);
+          z-index: 60;
+        }
         .voice-modal {
-          width: 420px;
-          max-width: calc(100vw - 40px);
-          background: var(--surface-raised);
+          width: 440px;
+          max-width: calc(100vw - 32px);
+          background: linear-gradient(180deg, var(--surface-raised), var(--surface));
           border: 1px solid var(--line);
-          border-radius: 14px;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+          border-radius: 18px;
+          position: relative;
+          box-shadow:
+            0 0 0 1px rgba(var(--ai-rgb), 0.08),
+            0 20px 60px -12px rgba(0,0,0,0.55),
+            0 0 80px -20px rgba(var(--ai-rgb), 0.25);
           overflow: hidden;
         }
-        .voice-idle { padding: 28px 24px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
-        .voice-mic-btn {
-          width: 64px;
-          height: 64px;
-          border-radius: 50%;
-          background: rgba(var(--blue-rgb), 0.12);
-          border: 1px solid rgba(var(--blue-rgb), 0.4);
-          color: var(--blue);
-          display: flex;
-          align-items: center;
-          justify-content: center;
+        .voice-modal-glow {
+          position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+          background: linear-gradient(90deg, transparent, rgba(var(--ai-rgb),0.6), transparent);
         }
-        .voice-mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        .voice-idle-icon { color: var(--blue); }
+        .voice-modal-close {
+          position: absolute; top: 14px; right: 14px; width: 34px; height: 34px; border-radius: 9px;
+          border: none; background: rgba(255,255,255,0.04); color: var(--text-faint);
+          display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2;
+        }
+        .voice-modal-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+
+        .voice-idle { padding: 40px 32px 32px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+        .voice-idle-icon { color: var(--ai); }
         .voice-idle-title { font-size: 15px; font-weight: 600; }
         .voice-idle-hint { font-size: 13px; color: var(--text-faint); }
-        .voice-idle-eg { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
-        .voice-unsupported { font-size: 12px; color: var(--red); }
-        .voice-typed-row { display: flex; gap: 8px; width: 100%; margin-top: 6px; }
+        .voice-example { font-size: 13px; color: var(--text-faint); }
+        .voice-typed-row { width: 100%; margin-top: 6px; }
         .voice-typed-input {
-          flex: 1;
-          background: var(--surface);
-          border: 1px solid var(--line);
-          border-radius: 8px;
-          padding: 8px 10px;
-          color: var(--text);
-          font-size: 13px;
+          width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+          padding: 13px 14px; color: var(--text); font-size: 13px;
         }
-        .voice-typed-btn {
-          flex-shrink: 0;
-          background: var(--amber);
-          color: #241701;
-          border: none;
-          border-radius: 8px;
-          padding: 8px 14px;
-          font-size: 13px;
-          font-weight: 600;
+        .voice-typed-input:focus { outline: none; border-color: var(--blue); }
+        .voice-typed-actions { display: flex; gap: 8px; justify-content: center; width: 100%; }
+
+        .rec-console { padding: 40px 32px 32px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+        .rec-ring-wrap { position: relative; width: 100px; height: 100px; display: flex; align-items: center; justify-content: center; }
+        .rec-ring { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid rgba(var(--red-rgb), 0.45); animation: recPulse 2s ease-out infinite; }
+        .rec-ring.d2 { animation-delay: .66s; }
+        .rec-ring.d3 { animation-delay: 1.32s; }
+        @keyframes recPulse { 0% { transform: scale(0.68); opacity: .8; } 100% { transform: scale(1.55); opacity: 0; } }
+        .rec-btn {
+          width: 62px; height: 62px; border-radius: 50%; border: none; background: var(--red); color: #fff;
+          display: flex; align-items: center; justify-content: center; cursor: pointer; position: relative; z-index: 1;
+          box-shadow: 0 6px 22px rgba(var(--red-rgb), 0.4);
         }
-        .voice-listening { padding: 26px 24px 22px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
-        .voice-ring-wrap { position: relative; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
-        .voice-ring {
-          position: absolute;
-          inset: 0;
-          border-radius: 50%;
-          border: 1.5px solid rgba(var(--blue-rgb), 0.5);
-          animation: voiceRingPulse 1.8s ease-out infinite;
+        .rec-stop-sq { width: 16px; height: 16px; border-radius: 3px; background: #fff; }
+        .rec-timer { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--red); display: flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+        .rec-timer-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); animation: blinkDot 1s step-end infinite; }
+        @keyframes blinkDot { 50% { opacity: .25; } }
+        .rec-wave { display: flex; align-items: flex-end; gap: 3px; height: 28px; }
+        .rec-wave span {
+          width: 3px; border-radius: 2px; min-height: 3px;
+          background: var(--ai);
+          box-shadow: 0 0 6px rgba(var(--ai-rgb), 0.35);
+          animation: waveBounce 1.1s ease-in-out infinite;
         }
-        .voice-ring-delay1 { animation-delay: 0.45s; }
-        .voice-ring-delay2 { animation-delay: 0.9s; }
-        @keyframes voiceRingPulse {
-          0% { transform: scale(0.72); opacity: 0.9; }
-          100% { transform: scale(1.55); opacity: 0; }
-        }
-        .voice-mic-core {
-          position: relative;
-          z-index: 2;
-          width: 56px;
-          height: 56px;
-          border-radius: 50%;
-          background: var(--blue);
-          color: #06101f;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          box-shadow: 0 0 24px rgba(var(--blue-rgb), 0.55);
-        }
-        .voice-wave { display: flex; align-items: flex-end; gap: 3px; height: 22px; }
-        .voice-wave span {
-          width: 3px;
-          border-radius: 2px;
-          background: var(--blue);
-          height: 60%;
-          animation: voiceWaveBar 1.1s ease-in-out infinite;
-        }
-        @keyframes voiceWaveBar {
-          0%, 100% { transform: scaleY(0.4); opacity: 0.7; }
-          50% { transform: scaleY(1); opacity: 1; }
-        }
-        .voice-transcript { font-size: 15px; line-height: 1.5; text-align: center; min-height: 44px; }
-        .voice-final { color: var(--text); }
+        @keyframes waveBounce { 0%,100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+        .rec-transcript { font-size: 15.5px; text-align: center; max-width: 40ch; line-height: 1.55; color: var(--text-faint); min-height: 72px; }
+        .rec-transcript .seg-done, .voice-final { color: var(--text); }
         .voice-interim { color: var(--text-faint); }
-        .voice-status { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
-        .voice-stop-btn {
-          background: transparent;
-          border: 1px solid var(--line);
-          color: var(--text-muted);
-          border-radius: 8px;
-          padding: 7px 16px;
-          font-size: 13px;
-          font-weight: 600;
+        .rec-hint { font-size: 12px; color: var(--text-faint); text-align: center; }
+        .rec-hint b { color: var(--text-muted); font-weight: 500; }
+
+        .review-phase { padding: 28px 28px 24px; }
+        .review-title { font-size: 15px; font-weight: 600; font-family: 'Space Grotesk', sans-serif; }
+        .review-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; margin-bottom: 24px; }
+
+        .group { margin-bottom: 22px; }
+        .group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .group-icon { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .group-icon.bid { background: rgba(var(--green-rgb),0.14); color: var(--green); }
+        .group-icon.rfq { background: rgba(var(--amber-rgb),0.16); color: var(--amber); }
+        .group-title { font-size: 13px; font-weight: 600; }
+
+        .item-row {
+          border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+          background: var(--surface-raised); margin-bottom: 10px;
         }
-        .confirm-head {
-          padding: 16px 20px;
-          border-bottom: 1px solid var(--line);
-          display: flex;
-          align-items: center;
-          gap: 10px;
+        .item-row:last-child { margin-bottom: 0; }
+        .item-row.bid { border-color: rgba(var(--green-rgb), 0.22); }
+        .item-row.rfq { border-color: rgba(var(--amber-rgb), 0.22); }
+        .item-top { margin-bottom: 14px; }
+        .item-name { font-size: 15px; font-weight: 600; }
+        .item-status { font-size: 13px; margin-top: 3px; line-height: 1.4; }
+        .item-status.bid { color: var(--green); }
+        .item-name-input {
+          width: 100%; background: none; border: none; border-bottom: 1px solid var(--line);
+          padding: 3px 0 10px; font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px;
         }
-        .confirm-head-icon { color: var(--blue); flex-shrink: 0; display: flex; }
-        .confirm-head-title { font-size: 14px; font-weight: 600; }
-        .confirm-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
-        .confirm-field { display: flex; flex-direction: column; gap: 6px; }
-        .confirm-field-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
-        .confirm-field-static { font-size: 15px; font-weight: 600; padding: 9px 0; }
-        .voice-unmatched-msg { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
-        .confirm-field-input {
-          background: var(--surface);
-          border: 1px solid var(--line);
-          border-radius: 8px;
-          padding: 9px 12px;
-          font-family: 'JetBrains Mono', monospace;
-          font-size: 14px;
-          color: var(--text);
+        .item-name-input.has-error { border-color: var(--red); }
+        .item-fields { display: flex; gap: 14px; }
+        .item-fields > div { flex: 1; }
+        .item-field-label { font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 6px; }
+        .item-input-wrap { position: relative; display: flex; align-items: center; }
+        .item-currency { position: absolute; left: 12px; font-size: 13px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; }
+        .item-input {
+          width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface);
+          color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 13px; padding: 0 12px;
         }
-        .confirm-field-input.has-error { border-color: var(--red); background: rgba(var(--red-rgb), 0.08); }
-        .confirm-footer { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 10px; justify-content: flex-end; }
+        .item-input.with-currency { padding-left: 30px; }
+        .item-input.has-error { border-color: var(--red); background: rgba(var(--red-rgb), 0.08); }
+        .item-input:focus { outline: none; border-color: var(--blue); }
+
+        /* Multi-variant products expand into one row per variant - same
+           mental model as the real Place Your Bid table, so nothing new
+           to learn. The parsed qty/price prefill only the matched
+           variant; the rest stay empty and optional. */
+        .variant-table { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+        .variant-head, .variant-row { display: grid; grid-template-columns: 1fr 1.4fr 0.8fr 1fr; gap: 10px; align-items: center; }
+        .variant-head { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+        .variant-row { padding: 7px 0; }
+        .variant-cell { font-size: 13px; color: var(--text); }
+        .variant-input { height: 34px; font-size: 13px; }
+
+        .review-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--line); }
         .btn {
           font-size: 13.5px;
           font-weight: 600;
@@ -4168,7 +4358,9 @@ export default function MarketScreen() {
           background: transparent;
           color: var(--text-muted);
         }
+        .btn:hover { border-color: var(--text-faint); background: var(--surface-raised); color: var(--text); }
         .btn.primary { background: var(--amber); border-color: var(--amber); color: #241701; }
+        .btn.primary:hover { filter: brightness(1.08); }
 
 
         /* TRAY */
@@ -4935,6 +5127,28 @@ export default function MarketScreen() {
         }
         .mobile-submit-btn { width: 100%; justify-content: center; padding: 13px; }
 
+        /* Voice request sheet reuses the tray sheet chrome above - these
+           just size its shared inputs/CTAs for a thumb instead of a mouse,
+           same components, no new tokens.
+           .mobile-tray-list already supplies the sheet's side padding, so
+           the desktop phase containers' own padding is zeroed here -
+           otherwise it stacks on top and halves the usable width. */
+        .mobile-tray-sheet .voice-idle,
+        .mobile-tray-sheet .rec-console,
+        .mobile-tray-sheet .review-phase { padding: 8px 0 0; }
+        .mobile-tray-sheet .item-input,
+        .mobile-tray-sheet .voice-typed-input { height: 48px; font-size: 15px; width: 100%; }
+        .mobile-tray-sheet .item-name { font-size: 16px; }
+        .mobile-tray-sheet .item-status { font-size: 14px; }
+        .mobile-tray-sheet .btn { height: 48px; }
+        .mobile-tray-footer { display: flex; gap: 10px; }
+        .mobile-tray-footer .btn { flex: 1; justify-content: center; }
+        .mobile-tray-sheet .variant-head,
+        .mobile-tray-sheet .variant-row { display: flex; flex-wrap: wrap; gap: 10px; }
+        .mobile-tray-sheet .variant-cell,
+        .mobile-tray-sheet .variant-row .item-input,
+        .mobile-tray-sheet .variant-row .item-input-wrap { flex: 1 1 45%; }
+
         @media (min-width: 640px) and (max-width: 1023px) {
           .product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
@@ -4944,8 +5158,8 @@ export default function MarketScreen() {
       <VoiceRequestModal
         open={voiceModalOpen}
         onClose={() => setVoiceModalOpen(false)}
-        onMatchedConfirm={addVoiceMatchToOrderBook}
-        onUnmatchedSend={sendUnmatchedVoiceRequest}
+        onConfirm={confirmVoiceItems}
+        isCompact={isCompact}
       />
       {voiceToast && (
         <div className="confirm-toast">
@@ -4989,6 +5203,7 @@ export default function MarketScreen() {
                     <span className="searchbar-kbd">/</span>
                   </div>
                   <button className="voice-entry-btn" onClick={() => setVoiceModalOpen(true)} title="Request a product by voice">
+                    <VoiceTraceIcon />
                     <Mic size={16} strokeWidth={1.9} />
                   </button>
                 </div>
@@ -5144,6 +5359,7 @@ export default function MarketScreen() {
                 />
               </div>
               <button className="voice-entry-btn" onClick={() => setVoiceModalOpen(true)} title="Request a product by voice">
+                <VoiceTraceIcon />
                 <Mic size={16} strokeWidth={1.9} />
               </button>
             </div>
